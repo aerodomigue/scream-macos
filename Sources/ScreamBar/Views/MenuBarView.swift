@@ -33,7 +33,11 @@ struct MenuBarView: View {
                         JackInstallGuideView()
                     }
                 case .settings:
-                    SettingsView(configuration: $viewModel.configuration)
+                    SettingsView(
+                        configuration: $viewModel.configuration,
+                        hotkeyService: viewModel.hotkeyService,
+                        usbWatcherService: viewModel.usbWatcherService
+                    )
                 case .logs:
                     LogView(logStore: viewModel.logStore)
                 }
