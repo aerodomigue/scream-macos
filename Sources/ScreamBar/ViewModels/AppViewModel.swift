@@ -13,7 +13,10 @@ final class AppViewModel: ObservableObject {
     let logStore = RollingLogStore()
     let jackService: JackService
     let screamService: ScreamService
+    let hotkeyService = HotkeyService()
+    let usbWatcherService = USBWatcherService()
     private var cancellables = Set<AnyCancellable>()
+    private var wasRunningBeforeSleep = false
 
     @Published var configuration: ScreamConfiguration {
         didSet {
@@ -80,11 +83,62 @@ final class AppViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        hotkeyService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        usbWatcherService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        hotkeyService.onToggle = { [weak self] in
+            guard let self else { return }
+            self.logStore.append(source: .app, message: "Hotkey triggered toggle")
+            self.toggleScream()
+        }
+
+        usbWatcherService.onStart = { [weak self] in
+            guard let self else { return }
+            self.logStore.append(source: .app, message: "USB trigger — starting Scream")
+            self.startScream()
+        }
+
+        usbWatcherService.onStop = { [weak self] in
+            guard let self else { return }
+            self.logStore.append(source: .app, message: "USB trigger — stopping Scream")
+            self.stopScream()
+        }
+
         setupTerminationObserver()
+        setupSleepWakeObserver()
 
         if autoStart {
             startAll()
         }
+    }
+
+    func toggleScream() {
+        if screamService.status == .running {
+            stopScream()
+        } else {
+            startScream()
+        }
+    }
+
+    func startScream() {
+        guard jackService.status == .running else {
+            logStore.append(source: .app, message: "JACK not running, cannot start Scream")
+            return
+        }
+        logStore.append(source: .app, message: "Starting Scream")
+        screamService.start(configuration: configuration)
+    }
+
+    func stopScream() {
+        logStore.append(source: .app, message: "Stopping Scream")
+        screamService.stop()
     }
 
     func startAll() {
@@ -138,6 +192,45 @@ final class AppViewModel: ObservableObject {
             Task { @MainActor in
                 self.screamService.stop()
                 self.jackService.stop()
+            }
+        }
+    }
+
+    private func setupSleepWakeObserver() {
+        let center = NSWorkspace.shared.notificationCenter
+
+        center.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                logger.info("System going to sleep")
+                self.logStore.append(source: .app, message: "System going to sleep")
+                if self.jackService.status == .running {
+                    self.wasRunningBeforeSleep = true
+                    self.stopAll()
+                }
+            }
+        }
+
+        center.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                logger.info("System woke up")
+                self.logStore.append(source: .app, message: "System woke up")
+                if self.wasRunningBeforeSleep {
+                    self.wasRunningBeforeSleep = false
+                    // Wait for CoreAudio to reinitialize
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    self.logStore.append(source: .app, message: "Restarting services after wake")
+                    self.startAll()
+                }
             }
         }
     }
