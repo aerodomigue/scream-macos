@@ -17,6 +17,7 @@ final class AppViewModel: ObservableObject {
     let usbWatcherService = USBWatcherService()
     private var cancellables = Set<AnyCancellable>()
     private var wasRunningBeforeSleep = false
+    private var jackWasRunning = false
 
     @Published var configuration: ScreamConfiguration {
         didSet {
@@ -76,6 +77,21 @@ final class AppViewModel: ObservableObject {
         jackService.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        jackService.$status
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] newStatus in
+                guard let self else { return }
+                switch newStatus {
+                case .running:
+                    self.jackWasRunning = true
+                case .stopped:
+                    self.jackWasRunning = false
+                default:
+                    break
+                }
+            }
             .store(in: &cancellables)
 
         screamService.objectWillChange
@@ -208,8 +224,9 @@ final class AppViewModel: ObservableObject {
             Task { @MainActor in
                 logger.info("System going to sleep")
                 self.logStore.append(source: .app, message: "System going to sleep")
-                if self.jackService.status == .running {
+                if self.jackWasRunning {
                     self.wasRunningBeforeSleep = true
+                    self.jackWasRunning = false
                     self.stopAll()
                 }
             }
