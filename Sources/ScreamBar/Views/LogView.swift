@@ -25,9 +25,7 @@ struct LogView: View {
                     }
                     .onChange(of: logStore.entries.count) { _ in
                         if let lastEntry = logStore.entries.last {
-                            withAnimation {
-                                proxy.scrollTo(lastEntry.id, anchor: .bottom)
-                            }
+                            proxy.scrollTo(lastEntry.id, anchor: .bottom)
                         }
                     }
                 }

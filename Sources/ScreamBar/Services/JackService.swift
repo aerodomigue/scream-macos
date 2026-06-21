@@ -29,9 +29,11 @@ final class JackService: ObservableObject {
                 guard let self else { return }
                 if case .stopping = self.status {
                     self.status = .stopped
-                } else {
+                } else if self.weStartedJack {
                     self.status = .error("jackd exited with code \(exitStatus)")
                     self.logStore?.append(source: .jack, message: "jackd exited unexpectedly with code \(exitStatus)")
+                } else {
+                    self.status = .stopped
                 }
             }
         }
@@ -56,7 +58,7 @@ final class JackService: ObservableObject {
         }
     }
 
-    func start() {
+    func start(configuration: ScreamConfiguration) {
         guard isInstalled else {
             status = .error("jackd not found at \(Self.jackdPath)")
             return
@@ -71,12 +73,14 @@ final class JackService: ObservableObject {
         }
 
         status = .starting
-        logStore?.append(source: .jack, message: "Starting jackd -d coreaudio")
+        cleanStaleMetadata()
+        let arguments = configuration.buildJackArguments()
+        logStore?.append(source: .jack, message: "Starting jackd \(arguments.joined(separator: " "))")
 
         do {
             try processManager.start(
                 executablePath: Self.jackdPath,
-                arguments: ["-d", "coreaudio"]
+                arguments: arguments
             )
             status = .running
             weStartedJack = true
@@ -88,8 +92,7 @@ final class JackService: ObservableObject {
 
     func stop() {
         guard weStartedJack else {
-            logStore?.append(source: .jack, message: "JACK was not started by us, skipping stop")
-            status = .stopped
+            logStore?.append(source: .jack, message: "JACK is external — leaving it running")
             return
         }
 
@@ -98,7 +101,72 @@ final class JackService: ObservableObject {
         processManager.stop()
     }
 
+    /// Force-kill any running jackd, including external instances not started by us.
+    /// Triggered by shift-click on the Stop button.
+    func forceStop() {
+        logStore?.append(source: .jack, message: "Force-stopping JACK (shift-click)")
+
+        if weStartedJack {
+            status = .stopping
+            processManager.stop()
+            return
+        }
+
+        status = .stopping
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-9", "-f", "jackd"]
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            weStartedJack = false
+            status = .stopped
+            logStore?.append(source: .jack, message: "External JACK killed via pkill")
+        } catch {
+            status = .error("pkill failed: \(error.localizedDescription)")
+            logStore?.append(source: .jack, message: "pkill failed: \(error.localizedDescription)")
+        }
+    }
+
+    func terminateNow() {
+        guard weStartedJack else { return }
+        status = .stopping
+        processManager.forceTerminate()
+        weStartedJack = false
+        status = .stopped
+    }
+
+    func prepareForWakeRestart() {
+        status = .stopping
+        processManager.forceTerminate()
+        weStartedJack = false
+        status = .stopped
+
+        // Kill any stray jackd not owned by our processManager
+        let pkill = Process()
+        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkill.arguments = ["-9", "-f", "jackd"]
+        pkill.standardOutput = Pipe()
+        pkill.standardError = Pipe()
+        try? pkill.run()
+        logStore?.append(source: .jack, message: "Force-killed lingering jackd for wake restart")
+    }
+
     var isProcessRunning: Bool {
         processManager.isRunning
+    }
+
+    private func cleanStaleMetadata() {
+        let dbDir = "/tmp/jack_db-\(getuid())"
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: dbDir) else { return }
+        do {
+            try fileManager.removeItem(atPath: dbDir)
+            logger.info("Removed stale JACK metadata at \(dbDir)")
+            logStore?.append(source: .jack, message: "Cleaned stale metadata DB")
+        } catch {
+            logger.warning("Failed to remove JACK metadata: \(error.localizedDescription)")
+        }
     }
 }

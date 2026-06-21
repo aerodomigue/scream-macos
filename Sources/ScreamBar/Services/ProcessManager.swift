@@ -48,6 +48,11 @@ final class ProcessManager: @unchecked Sendable {
             guard let self else { return }
             self.lock.lock()
             self.isRunning = false
+            self.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+            self.stderrPipe?.fileHandleForReading.readabilityHandler = nil
+            self.process = nil
+            self.stdoutPipe = nil
+            self.stderrPipe = nil
             self.lock.unlock()
             let status = process.terminationStatus
             logger.info("Process terminated with status \(status)")
@@ -69,10 +74,11 @@ final class ProcessManager: @unchecked Sendable {
             lock.unlock()
             return
         }
+        let pid = proc.processIdentifier
         lock.unlock()
 
-        logger.info("Sending SIGTERM to PID=\(proc.processIdentifier)")
-        proc.terminate()
+        logger.info("Sending SIGINT to PID=\(pid)")
+        proc.interrupt()
 
         DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self else { return }
@@ -81,10 +87,25 @@ final class ProcessManager: @unchecked Sendable {
             self.lock.unlock()
 
             if stillRunning {
-                logger.warning("Process did not terminate after 3s, sending SIGKILL")
-                kill(proc.processIdentifier, SIGKILL)
+                logger.warning("Process did not exit after 3s, sending SIGKILL to PID=\(pid)")
+                kill(pid, SIGKILL)
             }
         }
+    }
+
+    func forceTerminate() {
+        lock.lock()
+        defer { lock.unlock() }
+        if let proc = process, isRunning {
+            proc.terminationHandler = nil
+            stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+            stderrPipe?.fileHandleForReading.readabilityHandler = nil
+            kill(proc.processIdentifier, SIGKILL)
+        }
+        isRunning = false
+        process = nil
+        stdoutPipe = nil
+        stderrPipe = nil
     }
 
     private func setupOutputHandler(pipe: Pipe) {

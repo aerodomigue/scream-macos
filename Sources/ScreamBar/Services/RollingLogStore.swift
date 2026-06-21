@@ -24,11 +24,10 @@ final class RollingLogStore: ObservableObject {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        for line in trimmed.components(separatedBy: .newlines) {
-            let entry = LogEntry(timestamp: Date(), source: source, message: line)
-            entries.append(entry)
-            currentSizeBytes += line.utf8.count
-        }
+        let lines = trimmed.components(separatedBy: .newlines)
+        let newEntries = lines.map { LogEntry(timestamp: Date(), source: source, message: $0) }
+        entries.append(contentsOf: newEntries)
+        currentSizeBytes += newEntries.reduce(0) { $0 + $1.message.utf8.count }
 
         trimIfNeeded()
     }

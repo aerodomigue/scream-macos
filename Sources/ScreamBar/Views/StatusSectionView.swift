@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct StatusSectionView: View {
@@ -8,8 +9,14 @@ struct StatusSectionView: View {
             StatusRow(
                 serviceName: "JACK Server",
                 status: viewModel.jackService.status,
-                onStart: { viewModel.jackService.start() },
-                onStop: { viewModel.jackService.stop() }
+                onStart: { viewModel.jackService.start(configuration: viewModel.configuration) },
+                onStop: {
+                    if NSEvent.modifierFlags.contains(.shift) {
+                        viewModel.jackService.forceStop()
+                    } else {
+                        viewModel.jackService.stop()
+                    }
+                }
             )
 
             StatusRow(
@@ -21,6 +28,18 @@ struct StatusSectionView: View {
 
             Divider()
 
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.fill")
+                    .foregroundColor(.secondary)
+                    .frame(width: 16)
+                Slider(value: $viewModel.systemVolume, in: 0...1)
+                Image(systemName: "speaker.wave.3.fill")
+                    .foregroundColor(.secondary)
+                    .frame(width: 20)
+            }
+
+            Divider()
+
             HStack(spacing: 12) {
                 Button("Start All") {
                     viewModel.startAll()
@@ -28,7 +47,7 @@ struct StatusSectionView: View {
                 .disabled(viewModel.jackService.status == .running && viewModel.screamService.status == .running)
 
                 Button("Stop All") {
-                    viewModel.stopAll()
+                    viewModel.stopAll(force: NSEvent.modifierFlags.contains(.shift))
                 }
                 .disabled(viewModel.jackService.status == .stopped && viewModel.screamService.status == .stopped)
             }

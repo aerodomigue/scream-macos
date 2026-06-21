@@ -72,6 +72,19 @@ final class ScreamService: ObservableObject {
         processManager.stop()
     }
 
+    func terminateNow() {
+        status = .stopping
+        processManager.forceTerminate()
+        status = .stopped
+    }
+
+    func prepareForWakeRestart() {
+        status = .stopping
+        processManager.forceTerminate()
+        status = .stopped
+        logStore?.append(source: .scream, message: "Cleared scream state for wake restart")
+    }
+
     var isProcessRunning: Bool {
         processManager.isRunning
     }

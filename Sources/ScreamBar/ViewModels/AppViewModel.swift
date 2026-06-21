@@ -16,13 +16,23 @@ final class AppViewModel: ObservableObject {
     let hotkeyService = HotkeyService()
     let usbWatcherService = USBWatcherService()
     private var cancellables = Set<AnyCancellable>()
-    private var wasRunningBeforeSleep = false
-    private var jackWasRunning = false
+    private var jackShouldBeRunning = false
+    private var crashRecoveryGaveUp = false
+    private var isSleeping = false
+    private var jackRestartAttempts = 0
+    private var pendingRestartTask: Task<Void, Never>?
+    private var sleepStopTask: Task<Void, Never>?
+    private static let maxJackRestartAttempts = 3
+    private static let baseRestartDelaySeconds: UInt64 = 2
 
     @Published var configuration: ScreamConfiguration {
         didSet {
             saveConfiguration()
         }
+    }
+
+    @Published var systemVolume: Float = VolumeControl.getSystemVolume() {
+        didSet { VolumeControl.setSystemVolume(systemVolume) }
     }
 
     @Published var autoStart: Bool {
@@ -83,13 +93,9 @@ final class AppViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] newStatus in
                 guard let self else { return }
-                switch newStatus {
-                case .running:
-                    self.jackWasRunning = true
-                case .stopped:
-                    self.jackWasRunning = false
-                default:
-                    break
+                if case .error(let message) = newStatus {
+                    logger.error("JACK entered error state: \(message)")
+                    self.handleJackCrash()
                 }
             }
             .store(in: &cancellables)
@@ -112,19 +118,31 @@ final class AppViewModel: ObservableObject {
         hotkeyService.onToggle = { [weak self] in
             guard let self else { return }
             self.logStore.append(source: .app, message: "Hotkey triggered toggle")
-            self.toggleScream()
+            if self.configuration.toggleScope == .all {
+                self.toggleAll()
+            } else {
+                self.toggleScream()
+            }
         }
 
         usbWatcherService.onStart = { [weak self] in
             guard let self else { return }
-            self.logStore.append(source: .app, message: "USB trigger — starting Scream")
-            self.startScream()
+            self.logStore.append(source: .app, message: "USB trigger — starting")
+            if self.configuration.toggleScope == .all {
+                self.startAll()
+            } else {
+                self.startScream()
+            }
         }
 
         usbWatcherService.onStop = { [weak self] in
             guard let self else { return }
-            self.logStore.append(source: .app, message: "USB trigger — stopping Scream")
-            self.stopScream()
+            self.logStore.append(source: .app, message: "USB trigger — stopping")
+            if self.configuration.toggleScope == .all {
+                self.stopAll()
+            } else {
+                self.stopScream()
+            }
         }
 
         setupTerminationObserver()
@@ -143,6 +161,14 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func toggleAll() {
+        if screamService.status == .running || jackService.status == .running {
+            stopAll()
+        } else {
+            startAll()
+        }
+    }
+
     func startScream() {
         guard jackService.status == .running else {
             logStore.append(source: .app, message: "JACK not running, cannot start Scream")
@@ -157,10 +183,13 @@ final class AppViewModel: ObservableObject {
         screamService.stop()
     }
 
-    func startAll() {
+    func startAll(resetCrashCounter: Bool = true) {
+        jackShouldBeRunning = true
+        crashRecoveryGaveUp = false
+        if resetCrashCounter { jackRestartAttempts = 0 }
         logStore.append(source: .app, message: "Starting all services")
 
-        jackService.start()
+        jackService.start(configuration: configuration)
 
         guard jackService.status == .running else {
             logStore.append(source: .app, message: "JACK failed to start, aborting")
@@ -188,13 +217,24 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func stopAll() {
-        logStore.append(source: .app, message: "Stopping all services")
+    func stopAll(force: Bool = false) {
+        jackShouldBeRunning = false
+        crashRecoveryGaveUp = false
+        pendingRestartTask?.cancel()
+        pendingRestartTask = nil
+        sleepStopTask?.cancel()
+        sleepStopTask = nil
+        jackRestartAttempts = 0
+        logStore.append(source: .app, message: force ? "Stopping all services (force)" : "Stopping all services")
         screamService.stop()
 
         Task {
             try? await Task.sleep(nanoseconds: 500_000_000)
-            jackService.stop()
+            if force {
+                jackService.forceStop()
+            } else {
+                jackService.stop()
+            }
         }
     }
 
@@ -206,8 +246,10 @@ final class AppViewModel: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
-                self.screamService.stop()
-                self.jackService.stop()
+                self.pendingRestartTask?.cancel()
+                self.sleepStopTask?.cancel()
+                self.screamService.terminateNow()
+                self.jackService.terminateNow()
             }
         }
     }
@@ -224,10 +266,9 @@ final class AppViewModel: ObservableObject {
             Task { @MainActor in
                 logger.info("System going to sleep")
                 self.logStore.append(source: .app, message: "System going to sleep")
-                if self.jackWasRunning {
-                    self.wasRunningBeforeSleep = true
-                    self.jackWasRunning = false
-                    self.stopAll()
+                self.isSleeping = true
+                if self.jackShouldBeRunning {
+                    self.stopServicesForSleep()
                 }
             }
         }
@@ -241,14 +282,56 @@ final class AppViewModel: ObservableObject {
             Task { @MainActor in
                 logger.info("System woke up")
                 self.logStore.append(source: .app, message: "System woke up")
-                if self.wasRunningBeforeSleep {
-                    self.wasRunningBeforeSleep = false
-                    // Wait for CoreAudio to reinitialize
+                self.sleepStopTask?.cancel()
+                self.sleepStopTask = nil
+                // Keep isSleeping = true during the settle period to prevent handleJackCrash
+                // from triggering premature restarts while we prepare the wake sequence
+                self.jackRestartAttempts = 0
+                self.crashRecoveryGaveUp = false
+                if self.jackShouldBeRunning {
+                    // Wait for CoreAudio to reinitialize after wake
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     self.logStore.append(source: .app, message: "Restarting services after wake")
+                    // Force-clean state before restart to handle lingering processes
+                    self.screamService.prepareForWakeRestart()
+                    self.jackService.prepareForWakeRestart()
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    self.isSleeping = false
                     self.startAll()
+                } else {
+                    self.isSleeping = false
                 }
             }
+        }
+    }
+
+    private func handleJackCrash() {
+        guard jackShouldBeRunning, !isSleeping, !crashRecoveryGaveUp else { return }
+        guard jackRestartAttempts < Self.maxJackRestartAttempts else {
+            logStore.append(source: .app, message: "JACK restart limit reached (\(Self.maxJackRestartAttempts) attempts), giving up until next wake")
+            crashRecoveryGaveUp = true
+            return
+        }
+        jackRestartAttempts += 1
+        let delaySeconds = Self.baseRestartDelaySeconds * UInt64(jackRestartAttempts)
+        logStore.append(source: .app, message: "JACK crashed, restarting in \(delaySeconds)s (attempt \(jackRestartAttempts)/\(Self.maxJackRestartAttempts))")
+        pendingRestartTask?.cancel()
+        pendingRestartTask = Task {
+            try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
+            guard !Task.isCancelled, jackShouldBeRunning, !isSleeping, !crashRecoveryGaveUp else { return }
+            startAll(resetCrashCounter: false)
+        }
+    }
+
+    private func stopServicesForSleep() {
+        pendingRestartTask?.cancel()
+        pendingRestartTask = nil
+        logStore.append(source: .app, message: "Stopping services for sleep")
+        screamService.stop()
+        sleepStopTask = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            jackService.stop()
         }
     }
 

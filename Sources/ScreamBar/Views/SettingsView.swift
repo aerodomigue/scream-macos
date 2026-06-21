@@ -18,14 +18,44 @@ struct SettingsView: View {
                 .labelsHidden()
             }
 
-            Section("Network") {
-                HStack {
-                    Text("Port")
-                    Spacer()
-                    TextField("", value: $configuration.port, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 80)
+            if configuration.useUnicast {
+                Section("Network") {
+                    HStack {
+                        Text("Port")
+                        Spacer()
+                        TextField("", value: $configuration.port, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                    }
                 }
+            }
+
+            Section("JACK Audio") {
+                Picker("Sample rate", selection: $configuration.jackSampleRate) {
+                    Text("---").tag(Int?.none)
+                    ForEach(ScreamConfiguration.sampleRateOptions, id: \.self) { rate in
+                        Text("\(rate) Hz").tag(Int?.some(rate))
+                    }
+                }
+                Picker("Buffer size", selection: $configuration.jackBufferFrames) {
+                    Text("---").tag(Int?.none)
+                    ForEach(ScreamConfiguration.bufferFramesOptions, id: \.self) { frames in
+                        Text("\(frames) frames").tag(Int?.some(frames))
+                    }
+                }
+                Text("--- = use jackd default. Applied on next JACK start.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Trigger Scope") {
+                Picker("Toggle", selection: $configuration.toggleScope) {
+                    ForEach(ToggleScope.allCases, id: \.self) { scope in
+                        Text(scope.label).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
 
             Section("Global Shortcut") {
