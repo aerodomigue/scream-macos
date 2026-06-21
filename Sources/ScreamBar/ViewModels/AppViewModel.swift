@@ -31,10 +31,6 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    @Published var systemVolume: Float = VolumeControl.getSystemVolume() {
-        didSet { VolumeControl.setSystemVolume(systemVolume) }
-    }
-
     @Published var autoStart: Bool {
         didSet {
             UserDefaults.standard.set(autoStart, forKey: "autoStart")

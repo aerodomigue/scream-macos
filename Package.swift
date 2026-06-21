@@ -19,7 +19,6 @@ let package = Package(
             path: "Sources/ScreamBar",
             linkerSettings: [
                 .linkedFramework("IOKit"),
-                .linkedFramework("CoreAudio"),
             ]
         ),
     ]

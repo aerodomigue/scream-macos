@@ -28,18 +28,6 @@ struct StatusSectionView: View {
 
             Divider()
 
-            HStack(spacing: 8) {
-                Image(systemName: "speaker.fill")
-                    .foregroundColor(.secondary)
-                    .frame(width: 16)
-                Slider(value: $viewModel.systemVolume, in: 0...1)
-                Image(systemName: "speaker.wave.3.fill")
-                    .foregroundColor(.secondary)
-                    .frame(width: 20)
-            }
-
-            Divider()
-
             HStack(spacing: 12) {
                 Button("Start All") {
                     viewModel.startAll()
