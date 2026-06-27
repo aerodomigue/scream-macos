@@ -12,6 +12,27 @@ Scream receives audio from a Windows VM (or any Scream sender) over the network 
   brew install jack
   ```
 
+### Scream binary
+
+`make build` requires a `scream` binary compiled with JACK support placed at the root of this repo. The standard releases from [duncanthrax/scream](https://github.com/duncanthrax/scream#receivers) do not include macOS/JACK builds, so you need to compile it from source:
+
+```bash
+git clone https://github.com/duncanthrax/scream.git
+cd scream/Receivers/unix
+
+# Install build dependencies
+brew install cmake pkg-config
+
+cmake . -DUSE_JACK=ON
+make
+```
+
+Then copy the resulting `scream` binary to the root of this repo:
+
+```bash
+cp scream /path/to/scream-macos/scream
+```
+
 ## Build & Install
 
 ```bash
