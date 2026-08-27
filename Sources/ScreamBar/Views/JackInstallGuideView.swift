@@ -10,7 +10,11 @@ struct JackInstallGuideView: View {
             Text("JACK is not installed")
                 .font(.headline)
 
-            Text("ScreamBar requires JACK Audio Connection Kit to function. Install it using Homebrew:")
+            Text(
+                "Scream mode requires JACK Audio Connection Kit. "
+                    + "Direct Routing can be used without JACK. "
+                    + "Install JACK using Homebrew:"
+            )
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
