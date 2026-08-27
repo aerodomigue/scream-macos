@@ -27,16 +27,20 @@ struct MenuBarView: View {
             Group {
                 switch selectedTab {
                 case .status:
-                    if viewModel.jackService.isInstalled {
+                    if viewModel.applicationMode == .directRouting
+                        || viewModel.jackService.isInstalled {
                         StatusSectionView(viewModel: viewModel)
                     } else {
                         JackInstallGuideView()
                     }
                 case .settings:
                     SettingsView(
+                        applicationMode: $viewModel.applicationMode,
                         configuration: $viewModel.configuration,
+                        directRoutingConfiguration: $viewModel.directRoutingConfiguration,
                         hotkeyService: viewModel.hotkeyService,
-                        usbWatcherService: viewModel.usbWatcherService
+                        usbWatcherService: viewModel.usbWatcherService,
+                        directRoutingService: viewModel.directRoutingService
                     )
                 case .logs:
                     LogView(logStore: viewModel.logStore)
@@ -59,10 +63,7 @@ struct MenuBarView: View {
                     Spacer()
 
                     Button("Quit") {
-                        viewModel.stopAll()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            NSApplication.shared.terminate(nil)
-                        }
+                        viewModel.quit()
                     }
                     .font(.caption)
                 }

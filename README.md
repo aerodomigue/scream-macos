@@ -1,13 +1,13 @@
 # ScreamBar
 
-macOS menubar app that manages [Scream](https://github.com/duncanthrax/scream) audio receiver with JACK backend.
+macOS menubar app that can either manage a [Scream](https://github.com/duncanthrax/scream) receiver with JACK or route one CoreAudio input directly to an output device.
 
 Scream receives audio from a Windows VM (or any Scream sender) over the network and outputs it through JACK Audio Connection Kit on macOS.
 
 ## Prerequisites
 
 - macOS 13 (Ventura) or later
-- [JACK](https://jackaudio.org/) via Homebrew:
+- [JACK](https://jackaudio.org/) via Homebrew, required only for Scream mode:
   ```
   brew install jack
   ```
@@ -58,10 +58,11 @@ Start/stop JACK and Scream individually or together. Color indicators show servi
 - Orange: error
 
 ### Settings tab
-Configure Scream receiver parameters:
-- **Network**: unicast/multicast mode, port, interface, group address
-- **JACK**: client name, auto-connect ports
-- **Advanced**: target/max latency, verbose logging
+Choose the application mode and configure its parameters:
+- **Scream**: multicast/unicast, port, JACK sample rate and buffer size
+- **Direct Routing**: CoreAudio input/output devices and an optional explicit buffer size from 64 to 2048 frames
+
+Direct Routing stores device UIDs. If a preferred output disappears, the app temporarily uses the macOS default output and automatically restores the preferred output when it returns. Input devices do not fall back silently.
 
 Settings are saved automatically and persist across restarts.
 
@@ -74,8 +75,14 @@ On first launch, macOS will show a firewall popup asking to allow network connec
 
 ## How it works
 
-ScreamBar manages two processes:
+In Scream mode, ScreamBar manages two processes:
 1. `jackd -d coreaudio` — JACK audio server
 2. `scream -o jack [options]` — Scream network audio receiver
 
 If JACK is already running (started manually or by another app), ScreamBar detects it and won't try to manage its lifecycle.
+
+Direct Routing uses one shared-mode AUHAL. Separate input/output devices are combined in a process-private Aggregate Device after negotiating a common hardware sample rate. It does not change the macOS default output or request exclusive device access.
+
+The default `Automatic` buffer mode leaves device settings unchanged. Explicit buffer sizes are validated against both devices, applied before route creation, and restored when Direct Routing stops. Lower sizes reduce latency but can cause dropouts, particularly with Bluetooth devices.
+
+Run the unit and contract tests with `swift test`. Hardware coexistence tests are opt-in because they open the microphone and output devices: grant audio-input permission, then run `SCREAMBAR_RUN_COREAUDIO_INTEGRATION_TESTS=1 swift test`.

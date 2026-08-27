@@ -6,15 +6,15 @@ import os
 
 private let logger = Logger(subsystem: "com.screambar.app", category: "AppViewModel")
 
-private let configurationUserDefaultsKey = "screamConfiguration"
-
 @MainActor
 final class AppViewModel: ObservableObject {
     let logStore = RollingLogStore()
     let jackService: JackService
     let screamService: ScreamService
+    let directRoutingService: DirectAudioRoutingService
     let hotkeyService = HotkeyService()
     let usbWatcherService = USBWatcherService()
+    private let configurationStore: ConfigurationStore
     private var cancellables = Set<AnyCancellable>()
     private var jackShouldBeRunning = false
     private var crashRecoveryGaveUp = false
@@ -22,12 +22,31 @@ final class AppViewModel: ObservableObject {
     private var jackRestartAttempts = 0
     private var pendingRestartTask: Task<Void, Never>?
     private var sleepStopTask: Task<Void, Never>?
+    private var directRoutingShouldResumeAfterSleep = false
     private static let maxJackRestartAttempts = 3
     private static let baseRestartDelaySeconds: UInt64 = 2
+    private static let nanosecondsPerSecond: UInt64 = 1_000_000_000
+    private static let serviceStopDelayNanoseconds: UInt64 = 500_000_000
+    private static let jackInitializationDelayNanoseconds: UInt64 = 1_000_000_000
+    private static let wakeSettleDelayNanoseconds: UInt64 = 2_000_000_000
 
     @Published var configuration: ScreamConfiguration {
         didSet {
             saveConfiguration()
+        }
+    }
+
+    @Published var applicationMode: ApplicationMode {
+        didSet {
+            saveConfiguration()
+            switchApplicationMode(from: oldValue)
+        }
+    }
+
+    @Published var directRoutingConfiguration: DirectRoutingConfiguration {
+        didSet {
+            saveConfiguration()
+            directRoutingService.configurationDidChange(directRoutingConfiguration)
         }
     }
 
@@ -44,6 +63,19 @@ final class AppViewModel: ObservableObject {
     }
 
     var menuBarIcon: String {
+        if applicationMode == .directRouting {
+            switch directRoutingService.state {
+            case .running:
+                return "speaker.wave.2.fill"
+            case .starting, .reconfiguring, .stopping:
+                return "speaker.wave.1.fill"
+            case .failed:
+                return "speaker.slash.fill"
+            case .stopped, .waitingForInput, .waitingForOutput:
+                return "speaker.fill"
+            }
+        }
+
         let jackActive = jackService.status == .running
         let screamActive = screamService.status == .running
 
@@ -71,12 +103,17 @@ final class AppViewModel: ObservableObject {
 
     init() {
         let store = logStore
-        let config = Self.loadConfiguration()
+        let settingsStore = ConfigurationStore(logStore: store)
+        let appConfiguration = settingsStore.load()
 
-        self.configuration = config
+        self.configurationStore = settingsStore
+        self.configuration = appConfiguration.scream
+        self.applicationMode = appConfiguration.mode
+        self.directRoutingConfiguration = appConfiguration.directRouting
         self.autoStart = UserDefaults.standard.bool(forKey: "autoStart")
         self.jackService = JackService(logStore: store)
         self.screamService = ScreamService(logStore: store)
+        self.directRoutingService = DirectAudioRoutingService(logStore: store)
 
         launchAtLogin = SMAppService.mainApp.status == .enabled
 
@@ -101,6 +138,16 @@ final class AppViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        directRoutingService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        directRoutingService.deviceService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
         hotkeyService.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -114,39 +161,71 @@ final class AppViewModel: ObservableObject {
         hotkeyService.onToggle = { [weak self] in
             guard let self else { return }
             self.logStore.append(source: .app, message: "Hotkey triggered toggle")
-            if self.configuration.toggleScope == .all {
-                self.toggleAll()
-            } else {
-                self.toggleScream()
-            }
+            self.toggleActiveMode()
         }
 
         usbWatcherService.onStart = { [weak self] in
             guard let self else { return }
             self.logStore.append(source: .app, message: "USB trigger — starting")
-            if self.configuration.toggleScope == .all {
-                self.startAll()
-            } else {
-                self.startScream()
-            }
+            self.startActiveMode()
         }
 
         usbWatcherService.onStop = { [weak self] in
             guard let self else { return }
             self.logStore.append(source: .app, message: "USB trigger — stopping")
-            if self.configuration.toggleScope == .all {
-                self.stopAll()
-            } else {
-                self.stopScream()
-            }
+            self.stopActiveMode()
         }
 
         setupTerminationObserver()
         setupSleepWakeObserver()
 
         if autoStart {
-            startAll()
+            startActiveMode()
         }
+    }
+
+    func startActiveMode() {
+        switch applicationMode {
+        case .scream:
+            startAll()
+        case .directRouting:
+            directRoutingService.start(configuration: directRoutingConfiguration)
+        }
+    }
+
+    func stopActiveMode(force: Bool = false) {
+        switch applicationMode {
+        case .scream:
+            stopAll(force: force)
+        case .directRouting:
+            directRoutingService.stop()
+        }
+    }
+
+    func toggleActiveMode() {
+        switch applicationMode {
+        case .scream:
+            if configuration.toggleScope == .all {
+                toggleAll()
+            } else {
+                toggleScream()
+            }
+        case .directRouting:
+            if directRoutingService.desiredRunning {
+                directRoutingService.stop()
+            } else {
+                directRoutingService.start(configuration: directRoutingConfiguration)
+            }
+        }
+    }
+
+    func quit() {
+        pendingRestartTask?.cancel()
+        sleepStopTask?.cancel()
+        directRoutingService.shutdown()
+        screamService.terminateNow()
+        jackService.terminateNow()
+        NSApplication.shared.terminate(nil)
     }
 
     func toggleScream() {
@@ -194,7 +273,10 @@ final class AppViewModel: ObservableObject {
 
         // Give JACK time to initialize, then verify it's still running
         Task {
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+            guard await wait(
+                nanoseconds: Self.serviceStopDelayNanoseconds,
+                operation: "JACK startup probe"
+            ) else { return }
 
             guard jackService.isProcessRunning || jackService.status == .running else {
                 logStore.append(source: .app, message: "JACK crashed during startup, aborting")
@@ -202,7 +284,10 @@ final class AppViewModel: ObservableObject {
             }
 
             // Extra settle time for JACK server initialization
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s
+            guard await wait(
+                nanoseconds: Self.jackInitializationDelayNanoseconds,
+                operation: "JACK initialization"
+            ) else { return }
 
             guard jackService.isProcessRunning || jackService.status == .running else {
                 logStore.append(source: .app, message: "JACK crashed during initialization, aborting")
@@ -225,7 +310,10 @@ final class AppViewModel: ObservableObject {
         screamService.stop()
 
         Task {
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard await wait(
+                nanoseconds: Self.serviceStopDelayNanoseconds,
+                operation: "Scream shutdown"
+            ) else { return }
             if force {
                 jackService.forceStop()
             } else {
@@ -244,6 +332,7 @@ final class AppViewModel: ObservableObject {
             Task { @MainActor in
                 self.pendingRestartTask?.cancel()
                 self.sleepStopTask?.cancel()
+                self.directRoutingService.shutdown()
                 self.screamService.terminateNow()
                 self.jackService.terminateNow()
             }
@@ -263,7 +352,12 @@ final class AppViewModel: ObservableObject {
                 logger.info("System going to sleep")
                 self.logStore.append(source: .app, message: "System going to sleep")
                 self.isSleeping = true
-                if self.jackShouldBeRunning {
+                if self.applicationMode == .directRouting {
+                    self.directRoutingShouldResumeAfterSleep = self.directRoutingService.desiredRunning
+                    if self.directRoutingShouldResumeAfterSleep {
+                        self.directRoutingService.stop()
+                    }
+                } else if self.jackShouldBeRunning {
                     self.stopServicesForSleep()
                 }
             }
@@ -284,14 +378,28 @@ final class AppViewModel: ObservableObject {
                 // from triggering premature restarts while we prepare the wake sequence
                 self.jackRestartAttempts = 0
                 self.crashRecoveryGaveUp = false
-                if self.jackShouldBeRunning {
+                if self.applicationMode == .directRouting {
+                    self.isSleeping = false
+                    if self.directRoutingShouldResumeAfterSleep {
+                        self.directRoutingShouldResumeAfterSleep = false
+                        self.directRoutingService.start(
+                            configuration: self.directRoutingConfiguration
+                        )
+                    }
+                } else if self.jackShouldBeRunning {
                     // Wait for CoreAudio to reinitialize after wake
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    guard await self.wait(
+                        nanoseconds: Self.wakeSettleDelayNanoseconds,
+                        operation: "CoreAudio wake settle"
+                    ) else { return }
                     self.logStore.append(source: .app, message: "Restarting services after wake")
                     // Force-clean state before restart to handle lingering processes
                     self.screamService.prepareForWakeRestart()
                     self.jackService.prepareForWakeRestart()
-                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard await self.wait(
+                        nanoseconds: Self.serviceStopDelayNanoseconds,
+                        operation: "JACK wake cleanup"
+                    ) else { return }
                     self.isSleeping = false
                     self.startAll()
                 } else {
@@ -313,7 +421,10 @@ final class AppViewModel: ObservableObject {
         logStore.append(source: .app, message: "JACK crashed, restarting in \(delaySeconds)s (attempt \(jackRestartAttempts)/\(Self.maxJackRestartAttempts))")
         pendingRestartTask?.cancel()
         pendingRestartTask = Task {
-            try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
+            guard await wait(
+                nanoseconds: delaySeconds * Self.nanosecondsPerSecond,
+                operation: "JACK crash recovery"
+            ) else { return }
             guard !Task.isCancelled, jackShouldBeRunning, !isSleeping, !crashRecoveryGaveUp else { return }
             startAll(resetCrashCounter: false)
         }
@@ -325,23 +436,67 @@ final class AppViewModel: ObservableObject {
         logStore.append(source: .app, message: "Stopping services for sleep")
         screamService.stop()
         sleepStopTask = Task {
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard await wait(
+                nanoseconds: Self.serviceStopDelayNanoseconds,
+                operation: "sleep shutdown"
+            ) else { return }
             guard !Task.isCancelled else { return }
             jackService.stop()
         }
     }
 
     private func saveConfiguration() {
-        guard let data = try? JSONEncoder().encode(configuration) else { return }
-        UserDefaults.standard.set(data, forKey: configurationUserDefaultsKey)
+        configurationStore.save(
+            AppConfiguration(
+                mode: applicationMode,
+                scream: configuration,
+                directRouting: directRoutingConfiguration
+            )
+        )
     }
 
-    private static func loadConfiguration() -> ScreamConfiguration {
-        guard let data = UserDefaults.standard.data(forKey: configurationUserDefaultsKey),
-              let config = try? JSONDecoder().decode(ScreamConfiguration.self, from: data) else {
-            return ScreamConfiguration()
+    private func wait(nanoseconds: UInt64, operation: String) async -> Bool {
+        do {
+            try await Task.sleep(nanoseconds: nanoseconds)
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            logger.error("\(operation, privacy: .public) wait failed: \(error.localizedDescription, privacy: .public)")
+            logStore.append(
+                source: .app,
+                message: "\(operation) wait failed: \(error.localizedDescription)"
+            )
+            return false
         }
-        return config
+    }
+
+    private func switchApplicationMode(from previousMode: ApplicationMode) {
+        guard previousMode != applicationMode else { return }
+
+        let shouldContinueRunning: Bool
+        switch previousMode {
+        case .scream:
+            shouldContinueRunning = jackShouldBeRunning
+                || jackService.status.isActive
+                || screamService.status.isActive
+            pendingRestartTask?.cancel()
+            sleepStopTask?.cancel()
+            jackShouldBeRunning = false
+            screamService.terminateNow()
+            jackService.terminateNow()
+        case .directRouting:
+            shouldContinueRunning = directRoutingService.desiredRunning
+            directRoutingService.stopImmediately()
+        }
+
+        logStore.append(
+            source: .app,
+            message: "Switched mode from \(previousMode.label) to \(applicationMode.label)"
+        )
+        if shouldContinueRunning {
+            startActiveMode()
+        }
     }
 
     private func updateLoginItem() {

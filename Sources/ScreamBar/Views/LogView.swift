@@ -67,6 +67,7 @@ struct LogView: View {
         switch source {
         case .jack: return .blue
         case .scream: return .green
+        case .routing: return .purple
         case .app: return .secondary
         }
     }

@@ -2,15 +2,49 @@ import KeyboardShortcuts
 import SwiftUI
 
 struct SettingsView: View {
+    @Binding var applicationMode: ApplicationMode
     @Binding var configuration: ScreamConfiguration
+    @Binding var directRoutingConfiguration: DirectRoutingConfiguration
     @ObservedObject var hotkeyService: HotkeyService
     @ObservedObject var usbWatcherService: USBWatcherService
+    @ObservedObject var directRoutingService: DirectAudioRoutingService
     @State private var showingDevicePicker = false
 
     var body: some View {
         Form {
-            Section("Mode") {
-                Picker("Mode", selection: $configuration.useUnicast) {
+            Section("Application Mode") {
+                Picker("Application Mode", selection: $applicationMode) {
+                    ForEach(ApplicationMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            if applicationMode == .scream {
+                screamSettings
+            } else {
+                DirectRoutingSettingsView(
+                    configuration: $directRoutingConfiguration,
+                    deviceService: directRoutingService.deviceService,
+                    routingService: directRoutingService
+                )
+            }
+
+            commonSettings
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .sheet(isPresented: $showingDevicePicker) {
+            USBDevicePickerView(usbWatcherService: usbWatcherService)
+        }
+    }
+
+    @ViewBuilder
+    private var screamSettings: some View {
+        Section("Scream Network Mode") {
+                Picker("Network Mode", selection: $configuration.useUnicast) {
                     Text("Multicast").tag(false)
                     Text("Unicast").tag(true)
                 }
@@ -57,7 +91,10 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
+    }
 
+    @ViewBuilder
+    private var commonSettings: some View {
             Section("Global Shortcut") {
                 Toggle("Enable shortcut", isOn: $hotkeyService.isEnabled)
 
@@ -105,11 +142,5 @@ struct SettingsView: View {
                     }
                 }
             }
-        }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
-        .sheet(isPresented: $showingDevicePicker) {
-            USBDevicePickerView(usbWatcherService: usbWatcherService)
-        }
     }
 }

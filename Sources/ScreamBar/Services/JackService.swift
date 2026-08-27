@@ -54,6 +54,11 @@ final class JackService: ObservableObject {
             task.waitUntilExit()
             return task.terminationStatus == 0
         } catch {
+            logger.warning("Failed to inspect external JACK process: \(error.localizedDescription)")
+            logStore?.append(
+                source: .jack,
+                message: "Failed to inspect external JACK process: \(error.localizedDescription)"
+            )
             return false
         }
     }
@@ -145,7 +150,15 @@ final class JackService: ObservableObject {
         task.arguments = [signal, "-f", "jackd"]
         task.standardOutput = Pipe()
         task.standardError = Pipe()
-        try? task.run()
+        do {
+            try task.run()
+        } catch {
+            logger.error("Failed to run pkill for JACK: \(error.localizedDescription)")
+            logStore?.append(
+                source: .jack,
+                message: "Failed to run pkill for JACK: \(error.localizedDescription)"
+            )
+        }
     }
 
     private func cleanStaleMetadata() {

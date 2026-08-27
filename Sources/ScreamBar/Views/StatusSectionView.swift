@@ -5,6 +5,14 @@ struct StatusSectionView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
+        if viewModel.applicationMode == .scream {
+            screamStatus
+        } else {
+            directRoutingStatus
+        }
+    }
+
+    private var screamStatus: some View {
         VStack(spacing: 16) {
             StatusRow(
                 serviceName: "JACK Server",
@@ -41,6 +49,61 @@ struct StatusSectionView: View {
             }
         }
         .padding(16)
+    }
+
+    private var directRoutingStatus: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Circle()
+                    .fill(statusColor(for: viewModel.directRoutingService.state.processStatus))
+                    .frame(width: 10, height: 10)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Direct Routing")
+                        .font(.headline)
+                    Text(directRoutingDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if viewModel.directRoutingService.desiredRunning {
+                    Button("Stop") {
+                        viewModel.stopActiveMode()
+                    }
+                } else {
+                    Button("Start") {
+                        viewModel.startActiveMode()
+                    }
+                }
+            }
+            .padding(.horizontal, 4)
+        }
+        .padding(16)
+    }
+
+    private var directRoutingDescription: String {
+        switch viewModel.directRoutingService.state {
+        case .running(let route):
+            let fallbackSuffix = route.isUsingOutputFallback ? " (fallback)" : ""
+            return "\(route.input.name) → \(route.output.name), \(Int(route.nominalSampleRate)) Hz\(fallbackSuffix)"
+        case .waitingForInput:
+            return "Waiting for input"
+        case .waitingForOutput:
+            return "Waiting for output"
+        default:
+            return viewModel.directRoutingService.state.processStatus.label
+        }
+    }
+
+    private func statusColor(for status: ProcessStatus) -> Color {
+        switch status {
+        case .running: return .green
+        case .starting, .stopping: return .yellow
+        case .stopped: return .red
+        case .error: return .orange
+        }
     }
 }
 

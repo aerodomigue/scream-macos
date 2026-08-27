@@ -9,6 +9,7 @@ struct LogEntry: Identifiable {
     enum LogSource: String {
         case jack = "JACK"
         case scream = "Scream"
+        case routing = "Routing"
         case app = "App"
     }
 }

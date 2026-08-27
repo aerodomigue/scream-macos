@@ -18,7 +18,21 @@ let package = Package(
             ],
             path: "Sources/ScreamBar",
             linkerSettings: [
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("AVFAudio"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreAudio"),
                 .linkedFramework("IOKit"),
+            ]
+        ),
+        .testTarget(
+            name: "ScreamBarTests",
+            dependencies: ["ScreamBar"],
+            path: "Tests/ScreamBarTests",
+            linkerSettings: [
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("AVFAudio"),
+                .linkedFramework("CoreAudio"),
             ]
         ),
     ]

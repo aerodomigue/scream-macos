@@ -1,6 +1,12 @@
 import Foundation
 import IOKit
 import IOKit.usb
+import os
+
+private let usbWatcherLogger = Logger(
+    subsystem: "com.screambar.app",
+    category: "USBWatcherService"
+)
 
 private let usbWatcherEnabledKey = "usbWatcherEnabled"
 private let usbMonitoredDeviceKey = "usbMonitoredDevice"
@@ -230,12 +236,18 @@ final class USBWatcherService: ObservableObject {
     }
 
     private func saveMonitoredDevice() {
-        guard let device = monitoredDevice,
-              let data = try? JSONEncoder().encode(device) else {
+        guard let device = monitoredDevice else {
             UserDefaults.standard.removeObject(forKey: usbMonitoredDeviceKey)
             return
         }
-        UserDefaults.standard.set(data, forKey: usbMonitoredDeviceKey)
+        do {
+            let encodedDevice = try JSONEncoder().encode(device)
+            UserDefaults.standard.set(encodedDevice, forKey: usbMonitoredDeviceKey)
+        } catch {
+            usbWatcherLogger.error(
+                "Failed to save monitored USB device: \(error.localizedDescription)"
+            )
+        }
     }
 
     private static func loadTriggerMode() -> USBTriggerMode {
@@ -247,11 +259,17 @@ final class USBWatcherService: ObservableObject {
     }
 
     private static func loadMonitoredDevice() -> USBDeviceIdentifier? {
-        guard let data = UserDefaults.standard.data(forKey: usbMonitoredDeviceKey),
-              let device = try? JSONDecoder().decode(USBDeviceIdentifier.self, from: data) else {
+        guard let encodedDevice = UserDefaults.standard.data(forKey: usbMonitoredDeviceKey) else {
             return nil
         }
-        return device
+        do {
+            return try JSONDecoder().decode(USBDeviceIdentifier.self, from: encodedDevice)
+        } catch {
+            usbWatcherLogger.error(
+                "Failed to load monitored USB device: \(error.localizedDescription)"
+            )
+            return nil
+        }
     }
 
     private static func getIntProperty(service: io_service_t, key: String) -> Int {
