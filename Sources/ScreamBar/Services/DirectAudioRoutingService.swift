@@ -20,6 +20,7 @@ final class DirectAudioRoutingService: ObservableObject {
     private var activeRoute: PreparedAudioRoute?
     private var workerTask: Task<Void, Never>?
     private var desiredRevision: UInt64 = 0
+    private(set) var isShuttingDown = false
 
     init(
         logStore: RollingLogStore,
@@ -31,35 +32,47 @@ final class DirectAudioRoutingService: ObservableObject {
         self.permissionService = permissionService ?? AudioInputPermissionService()
         self.deviceService.onHardwareChanged = { [weak self] in
             guard let self, self.desiredRunning else { return }
-            self.requestReconciliation(reason: "CoreAudio hardware changed")
+            self.requestReconciliation(reason: "Direct Routing rebuilding after hardware change")
         }
     }
 
     func start(configuration: DirectRoutingConfiguration) {
+        guard !isShuttingDown else {
+            state = .failed(.serviceShuttingDown)
+            return
+        }
         self.configuration = configuration
         desiredRunning = true
         requestReconciliation(reason: "Starting Direct Routing")
     }
 
     func stop() {
+        guard !isShuttingDown else { return }
         desiredRunning = false
         requestReconciliation(reason: "Stopping Direct Routing")
     }
 
-    func stopImmediately() {
-        desiredRunning = false
-        desiredRevision &+= 1
-        workerTask?.cancel()
-        workerTask = nil
-        if let activeRoute {
-            do {
-                try deviceService.stopAndDestroyRoute(sessionID: activeRoute.sessionID)
-            } catch {
-                report("Immediate Direct Routing cleanup failed: \(error.localizedDescription)")
+    func stopAndWait() async throws {
+        guard !isShuttingDown else {
+            if activeRoute != nil {
+                throw AudioRoutingError.cleanupFailed([
+                    "Direct Routing still owns CoreAudio resources during shutdown",
+                ])
             }
-            self.activeRoute = nil
+            return
         }
-        state = .stopped
+        desiredRunning = false
+        requestReconciliation(reason: "Stopping Direct Routing with cleanup barrier")
+        let task = workerTask
+        await task?.value
+        if activeRoute != nil {
+            if case .failed(let error) = state {
+                throw error
+            }
+            throw AudioRoutingError.cleanupFailed([
+                "Direct Routing cleanup did not release the active route",
+            ])
+        }
     }
 
     func configurationDidChange(_ configuration: DirectRoutingConfiguration) {
@@ -69,18 +82,52 @@ final class DirectAudioRoutingService: ObservableObject {
         requestReconciliation(reason: "Direct Routing selection changed")
     }
 
-    func shutdown() {
-        stopImmediately()
-        deviceService.shutdown()
+    func shutdownAndWait() async -> [String] {
+        guard !isShuttingDown else { return [] }
+        isShuttingDown = true
+        desiredRunning = false
+        desiredRevision &+= 1
+        workerTask?.cancel()
+        let task = workerTask
+        await task?.value
+        workerTask = nil
+
+        var failures: [String] = []
+        if let activeRoute {
+            do {
+                try deviceService.stopAndDestroyRoute(sessionID: activeRoute.sessionID)
+                self.activeRoute = nil
+            } catch {
+                failures.append(error.localizedDescription)
+            }
+        }
+        failures.append(contentsOf: deviceService.shutdown())
+        state = failures.isEmpty ? .stopped : .failed(.cleanupFailed(failures))
+        return failures
+    }
+
+    func revalidatePermissionIfRunning() {
+        guard desiredRunning, !isShuttingDown else { return }
+        requestReconciliation(reason: "Revalidating audio input permission")
+    }
+
+    func waitForIdle() async {
+        await workerTask?.value
     }
 
     private func requestReconciliation(reason: String) {
+        guard !isShuttingDown else { return }
         desiredRevision &+= 1
         let revision = desiredRevision
-        workerTask?.cancel()
+        let predecessor = workerTask
+        predecessor?.cancel()
         report(reason)
         workerTask = Task { [weak self] in
+            await predecessor?.value
             guard let self else { return }
+            guard !Task.isCancelled,
+                  !self.isShuttingDown,
+                  revision == self.desiredRevision else { return }
             await self.reconcile(revision: revision)
         }
     }
@@ -95,7 +142,6 @@ final class DirectAudioRoutingService: ObservableObject {
                 if revision == desiredRevision {
                     state = .failed(.cleanupFailed([error.localizedDescription]))
                 }
-                self.activeRoute = nil
                 return
             }
             self.activeRoute = nil
@@ -116,18 +162,37 @@ final class DirectAudioRoutingService: ObservableObject {
             let route = try await deviceService.prepareRoute(
                 inputSelection: configuration.inputSelection,
                 outputSelection: configuration.outputSelection,
-                requestedBufferFrameSize: configuration.bufferSize.frameCount
+                requestedBufferFrameSize: configuration.bufferSize.frameCount,
+                preparationToken: UUID(),
+                isRevisionCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return revision == self.desiredRevision
+                        && self.desiredRunning
+                        && !self.isShuttingDown
+                }
             )
             preparedRoute = route
 
             guard revision == desiredRevision, desiredRunning else {
-                try deviceService.stopAndDestroyRoute(sessionID: route.sessionID)
+                guard cleanupPreparedRoute(route, reason: "stale prepared route") else {
+                    return
+                }
                 return
             }
 
-            try deviceService.startRoute(route)
+            try deviceService.startRoute(
+                route,
+                isRevisionCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return revision == self.desiredRevision
+                        && self.desiredRunning
+                        && !self.isShuttingDown
+                }
+            )
             guard revision == desiredRevision, desiredRunning else {
-                try deviceService.stopAndDestroyRoute(sessionID: route.sessionID)
+                guard cleanupPreparedRoute(route, reason: "stale started route") else {
+                    return
+                }
                 return
             }
 
@@ -138,33 +203,56 @@ final class DirectAudioRoutingService: ObservableObject {
             )
         } catch is CancellationError {
             if let preparedRoute {
-                do {
-                    try deviceService.stopAndDestroyRoute(sessionID: preparedRoute.sessionID)
-                } catch {
-                    report("Cancelled route cleanup failed: \(error.localizedDescription)")
-                }
+                _ = cleanupPreparedRoute(preparedRoute, reason: "cancelled route")
             }
         } catch let routingError as AudioRoutingError {
             if let preparedRoute {
-                do {
-                    try deviceService.stopAndDestroyRoute(sessionID: preparedRoute.sessionID)
-                } catch {
-                    report("Failed route cleanup failed: \(error.localizedDescription)")
+                guard cleanupPreparedRoute(
+                    preparedRoute,
+                    reason: "failed route",
+                    primaryError: routingError
+                ) else {
+                    return
                 }
             }
             guard revision == desiredRevision else { return }
             apply(routingError)
         } catch {
+            let domainError = AudioRoutingError.unexpected(
+                "The audio route could not complete the requested operation"
+            )
             if let preparedRoute {
-                do {
-                    try deviceService.stopAndDestroyRoute(sessionID: preparedRoute.sessionID)
-                } catch {
-                    report("Unexpected route cleanup failed: \(error.localizedDescription)")
+                guard cleanupPreparedRoute(
+                    preparedRoute,
+                    reason: "unexpected route",
+                    primaryError: domainError
+                ) else {
+                    return
                 }
             }
             guard revision == desiredRevision else { return }
             report("Unexpected Direct Routing error: \(error.localizedDescription)")
-            state = .failed(.unexpected(error.localizedDescription))
+            state = .failed(domainError)
+        }
+    }
+
+    private func cleanupPreparedRoute(
+        _ route: PreparedAudioRoute,
+        reason: String,
+        primaryError: AudioRoutingError? = nil
+    ) -> Bool {
+        do {
+            try deviceService.stopAndDestroyRoute(sessionID: route.sessionID)
+            if activeRoute?.sessionID == route.sessionID {
+                activeRoute = nil
+            }
+            return true
+        } catch {
+            activeRoute = route
+            let message = "Cleanup failed for \(reason): \(error.localizedDescription)"
+            report(message)
+            state = .failed(primaryError ?? .cleanupFailed([message]))
+            return false
         }
     }
 

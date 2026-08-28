@@ -72,9 +72,22 @@ final class ScreamService: ObservableObject {
         processManager.stop()
     }
 
-    func terminateNow() {
+    func stopAndWait() async throws {
         status = .stopping
-        processManager.forceTerminate()
+        logStore?.append(source: .scream, message: "Stopping scream with termination barrier")
+        let terminationStatus = try await processManager.stopAndWait()
+        status = .stopped
+        if let terminationStatus {
+            logStore?.append(
+                source: .scream,
+                message: "scream termination confirmed with status \(terminationStatus)"
+            )
+        }
+    }
+
+    func terminateAndWait() async throws {
+        status = .stopping
+        _ = try await processManager.forceTerminateAndWait()
         status = .stopped
     }
 

@@ -63,6 +63,8 @@ enum AudioRoutingError: LocalizedError, Equatable, Sendable {
     case auHALCreationFailed(AUHALContext)
     case auHALConfigurationFailed(stage: AUHALConfigurationStage, context: AUHALContext)
     case auHALStartFailed(AUHALContext)
+    case finalRouteValidationFailed(AUHALContext)
+    case serviceShuttingDown
     case cleanupFailed([String])
     case unexpected(String)
 
@@ -92,6 +94,10 @@ enum AudioRoutingError: LocalizedError, Equatable, Sendable {
             return "Failed to configure AUHAL during \(stage.rawValue)"
         case .auHALStartFailed:
             return "Failed to start AUHAL"
+        case .finalRouteValidationFailed:
+            return "The audio route changed while it was being prepared"
+        case .serviceShuttingDown:
+            return "Direct Routing is shutting down"
         case .cleanupFailed(let stages):
             return "Audio cleanup failed during: \(stages.joined(separator: ", "))"
         case .unexpected(let message):

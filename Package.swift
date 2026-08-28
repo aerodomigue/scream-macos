@@ -11,10 +11,16 @@ let package = Package(
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
     ],
     targets: [
+        .target(
+            name: "ScreamBarCoreAudioRT",
+            path: "Sources/ScreamBarCoreAudioRT",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
             name: "ScreamBar",
             dependencies: [
                 "KeyboardShortcuts",
+                "ScreamBarCoreAudioRT",
             ],
             path: "Sources/ScreamBar",
             linkerSettings: [

@@ -1,7 +1,7 @@
 import AudioToolbox
-import AVFAudio
 import CoreAudio
 import Foundation
+import ScreamBarCoreAudioRT
 import os
 
 private let auHALLogger = Logger(subsystem: "com.screambar.app", category: "AUHALPlaythrough")
@@ -11,6 +11,15 @@ enum AUHALPlaythroughTopology {
     static let outputElement: AudioUnitElement = 0
     static let inputEnableScope: AudioUnitScope = kAudioUnitScope_Input
     static let outputEnableScope: AudioUnitScope = kAudioUnitScope_Output
+}
+
+enum AUHALLifecycleState: Equatable {
+    case created
+    case initialized
+    case started
+    case stopped
+    case uninitialized
+    case disposed
 }
 
 struct AUHALSetupFailure: LocalizedError {
@@ -30,15 +39,44 @@ struct AUHALCreationFailure: LocalizedError {
     }
 }
 
+struct AUHALRetainedConstructionFailure: Error {
+    let primaryError: Error
+    let playthrough: AUHALPlaythrough
+    let cleanupFailures: [String]
+}
+
+struct AUHALTeardownOperations {
+    let start: (AudioUnit) -> OSStatus
+    let stop: (AudioUnit) -> OSStatus
+    let uninitialize: (AudioUnit) -> OSStatus
+    let dispose: (AudioUnit) -> OSStatus
+    let destroyRenderContext: (OpaquePointer) -> Void
+
+    static let live = AUHALTeardownOperations(
+        start: AudioOutputUnitStart,
+        stop: AudioOutputUnitStop,
+        uninitialize: AudioUnitUninitialize,
+        dispose: AudioComponentInstanceDispose,
+        destroyRenderContext: { context in
+            ScreamBarRenderContextDestroy(context)
+        }
+    )
+}
+
 final class AUHALPlaythrough {
     private enum ConnectionMode {
         case native
         case renderCallback
     }
 
+    private(set) var lifecycleState: AUHALLifecycleState
     private var audioUnit: AudioUnit?
-    private var renderContext: AUHALRenderContext?
-    private var isStarted = false
+    private var renderContext: OpaquePointer?
+    private let teardownOperations: AUHALTeardownOperations
+
+    var isFullyDisposed: Bool {
+        lifecycleState == .disposed && audioUnit == nil && renderContext == nil
+    }
 
     static func make(
         deviceID: AudioDeviceID,
@@ -49,37 +87,42 @@ final class AUHALPlaythrough {
     ) throws -> AUHALPlaythrough {
         if inputChannelCount == outputChannelCount {
             do {
-                return try AUHALPlaythrough(
+                return try makeConfigured(
                     deviceID: deviceID,
                     inputChannelCount: inputChannelCount,
                     inputChannelOffset: inputChannelOffset,
                     outputChannelCount: outputChannelCount,
                     nominalSampleRate: nominalSampleRate,
-                    preferredConnectionMode: .native
+                    connectionMode: .native
                 )
-            } catch let failure as AUHALSetupFailure where failure.stage == .playthroughConnection {
-                auHALLogger.info("Native AUHAL playthrough unavailable; using render callback")
+            } catch let failure as AUHALRetainedConstructionFailure {
+                throw failure
+            } catch let failure as AUHALSetupFailure
+                where failure.stage == .playthroughConnection {
+                auHALLogger.info(
+                    "Native AUHAL playthrough unavailable; using render callback"
+                )
             }
         }
 
-        return try AUHALPlaythrough(
+        return try makeConfigured(
             deviceID: deviceID,
             inputChannelCount: inputChannelCount,
             inputChannelOffset: inputChannelOffset,
             outputChannelCount: outputChannelCount,
             nominalSampleRate: nominalSampleRate,
-            preferredConnectionMode: .renderCallback
+            connectionMode: .renderCallback
         )
     }
 
-    private init(
+    private static func makeConfigured(
         deviceID: AudioDeviceID,
         inputChannelCount: Int,
         inputChannelOffset: Int,
         outputChannelCount: Int,
         nominalSampleRate: Double,
-        preferredConnectionMode: ConnectionMode
-    ) throws {
+        connectionMode: ConnectionMode
+    ) throws -> AUHALPlaythrough {
         guard inputChannelCount > 0, outputChannelCount > 0 else {
             throw AUHALSetupFailure(stage: .channelMapping, status: kAudio_ParamError)
         }
@@ -100,69 +143,176 @@ final class AUHALPlaythrough {
         guard creationStatus == noErr, let createdAudioUnit else {
             throw AUHALCreationFailure(status: creationStatus)
         }
-        audioUnit = createdAudioUnit
 
+        let playthrough = AUHALPlaythrough(
+            audioUnit: createdAudioUnit,
+            lifecycleState: .created,
+            renderContext: nil,
+            teardownOperations: .live
+        )
         do {
-            try enableIO(on: createdAudioUnit)
-            try bind(createdAudioUnit, to: deviceID)
-            try configureInputChannelMap(
-                on: createdAudioUnit,
+            try playthrough.configure(
+                deviceID: deviceID,
                 inputChannelCount: inputChannelCount,
-                inputChannelOffset: inputChannelOffset
+                inputChannelOffset: inputChannelOffset,
+                outputChannelCount: outputChannelCount,
+                nominalSampleRate: nominalSampleRate,
+                connectionMode: connectionMode
             )
-
-            let inputFormat = Self.makeClientFormat(
-                sampleRate: nominalSampleRate,
-                channelCount: inputChannelCount
-            )
-            let outputFormat = Self.makeClientFormat(
-                sampleRate: nominalSampleRate,
-                channelCount: outputChannelCount
-            )
-            try setClientFormats(
-                on: createdAudioUnit,
-                inputFormat: inputFormat,
-                outputFormat: outputFormat
-            )
-
-            switch preferredConnectionMode {
-            case .native:
-                try configureNativeConnection(on: createdAudioUnit)
-            case .renderCallback:
-                try configureRenderCallback(
-                    on: createdAudioUnit,
-                    inputFormat: inputFormat,
-                    outputChannelCount: outputChannelCount
-                )
-            }
-
             let initializationStatus = AudioUnitInitialize(createdAudioUnit)
             guard initializationStatus == noErr else {
                 throw AUHALSetupFailure(
-                    stage: preferredConnectionMode == .native ? .playthroughConnection : .clientStreamFormat,
+                    stage: connectionMode == .native
+                        ? .playthroughConnection
+                        : .clientStreamFormat,
                     status: initializationStatus
                 )
             }
+            playthrough.lifecycleState = .initialized
+            return playthrough
         } catch {
-            _ = disposeResources()
+            let cleanupFailures = playthrough.stopAndDispose()
+            if !playthrough.isFullyDisposed {
+                throw AUHALRetainedConstructionFailure(
+                    primaryError: error,
+                    playthrough: playthrough,
+                    cleanupFailures: cleanupFailures
+                )
+            }
             throw error
         }
+    }
+
+    init(
+        testingAudioUnit: AudioUnit,
+        lifecycleState: AUHALLifecycleState,
+        renderContext: OpaquePointer? = nil,
+        teardownOperations: AUHALTeardownOperations
+    ) {
+        self.audioUnit = testingAudioUnit
+        self.lifecycleState = lifecycleState
+        self.renderContext = renderContext
+        self.teardownOperations = teardownOperations
+    }
+
+    private init(
+        audioUnit: AudioUnit,
+        lifecycleState: AUHALLifecycleState,
+        renderContext: OpaquePointer?,
+        teardownOperations: AUHALTeardownOperations
+    ) {
+        self.audioUnit = audioUnit
+        self.lifecycleState = lifecycleState
+        self.renderContext = renderContext
+        self.teardownOperations = teardownOperations
     }
 
     func start() throws {
         guard let audioUnit else {
             throw AUHALSetupFailure(stage: .deviceBinding, status: kAudio_ParamError)
         }
-        guard !isStarted else { return }
-        let status = AudioOutputUnitStart(audioUnit)
+        guard lifecycleState == .initialized else {
+            if lifecycleState == .started {
+                return
+            }
+            throw AUHALSetupFailure(
+                stage: .playthroughConnection,
+                status: kAudio_ParamError
+            )
+        }
+        let status = teardownOperations.start(audioUnit)
         guard status == noErr else {
             throw AUHALSetupFailure(stage: .playthroughConnection, status: status)
         }
-        isStarted = true
+        lifecycleState = .started
     }
 
     func stopAndDispose() -> [String] {
-        disposeResources()
+        guard let audioUnit else {
+            return lifecycleState == .disposed
+                ? []
+                : ["AUHAL handle unavailable before disposal completed"]
+        }
+
+        if lifecycleState == .started {
+            let stopStatus = teardownOperations.stop(audioUnit)
+            guard stopStatus == noErr else {
+                return ["stop AUHAL (\(stopStatus))"]
+            }
+            lifecycleState = .stopped
+        }
+
+        if lifecycleState == .initialized || lifecycleState == .stopped {
+            let uninitializeStatus = teardownOperations.uninitialize(audioUnit)
+            guard uninitializeStatus == noErr
+                    || uninitializeStatus == kAudioUnitErr_Uninitialized else {
+                return ["uninitialize AUHAL (\(uninitializeStatus))"]
+            }
+            lifecycleState = .uninitialized
+        }
+
+        if lifecycleState == .created || lifecycleState == .uninitialized {
+            let disposeStatus = teardownOperations.dispose(audioUnit)
+            guard disposeStatus == noErr else {
+                return ["dispose AUHAL (\(disposeStatus))"]
+            }
+            lifecycleState = .disposed
+            self.audioUnit = nil
+            releaseRenderContext()
+        }
+
+        return isFullyDisposed ? [] : ["AUHAL teardown stopped at \(lifecycleState)"]
+    }
+
+    private func releaseRenderContext() {
+        guard let renderContext else { return }
+        teardownOperations.destroyRenderContext(renderContext)
+        self.renderContext = nil
+    }
+
+    private func configure(
+        deviceID: AudioDeviceID,
+        inputChannelCount: Int,
+        inputChannelOffset: Int,
+        outputChannelCount: Int,
+        nominalSampleRate: Double,
+        connectionMode: ConnectionMode
+    ) throws {
+        guard let audioUnit else {
+            throw AUHALSetupFailure(stage: .deviceBinding, status: kAudio_ParamError)
+        }
+        try enableIO(on: audioUnit)
+        try bind(audioUnit, to: deviceID)
+        try configureInputChannelMap(
+            on: audioUnit,
+            inputChannelCount: inputChannelCount,
+            inputChannelOffset: inputChannelOffset
+        )
+
+        let inputFormat = Self.makeClientFormat(
+            sampleRate: nominalSampleRate,
+            channelCount: inputChannelCount
+        )
+        let outputFormat = Self.makeClientFormat(
+            sampleRate: nominalSampleRate,
+            channelCount: outputChannelCount
+        )
+        try setClientFormats(
+            on: audioUnit,
+            inputFormat: inputFormat,
+            outputFormat: outputFormat
+        )
+
+        switch connectionMode {
+        case .native:
+            try configureNativeConnection(on: audioUnit)
+        case .renderCallback:
+            try configureRenderCallback(
+                on: audioUnit,
+                inputChannelCount: inputChannelCount,
+                outputChannelCount: outputChannelCount
+            )
+        }
     }
 
     private func enableIO(on audioUnit: AudioUnit) throws {
@@ -330,7 +480,7 @@ final class AUHALPlaythrough {
 
     private func configureRenderCallback(
         on audioUnit: AudioUnit,
-        inputFormat: AudioStreamBasicDescription,
+        inputChannelCount: Int,
         outputChannelCount: Int
     ) throws {
         var maximumFramesPerSlice: UInt32 = 0
@@ -350,24 +500,21 @@ final class AUHALPlaythrough {
             )
         }
 
-        var mutableInputFormat = inputFormat
-        guard let avInputFormat = AVAudioFormat(streamDescription: &mutableInputFormat),
-              let inputBuffer = AVAudioPCMBuffer(
-                  pcmFormat: avInputFormat,
-                  frameCapacity: maximumFramesPerSlice
-              ) else {
-            throw AUHALSetupFailure(stage: .clientStreamFormat, status: kAudio_ParamError)
+        guard let context = ScreamBarRenderContextCreate(
+            audioUnit,
+            UInt32(inputChannelCount),
+            UInt32(outputChannelCount),
+            maximumFramesPerSlice
+        ) else {
+            throw AUHALSetupFailure(
+                stage: .clientStreamFormat,
+                status: OSStatus(memFullErr)
+            )
         }
-
-        let context = AUHALRenderContext(
-            audioUnit: audioUnit,
-            inputBuffer: inputBuffer,
-            outputChannelCount: outputChannelCount
-        )
         renderContext = context
         var callback = AURenderCallbackStruct(
-            inputProc: auHALPlaythroughRenderCallback,
-            inputProcRefCon: Unmanaged.passUnretained(context).toOpaque()
+            inputProc: ScreamBarRenderCallback,
+            inputProcRefCon: UnsafeMutableRawPointer(context)
         )
         let status = AudioUnitSetProperty(
             audioUnit,
@@ -382,33 +529,6 @@ final class AUHALPlaythrough {
         }
     }
 
-    private func disposeResources() -> [String] {
-        guard let audioUnit else { return [] }
-        var failures: [String] = []
-
-        if isStarted {
-            let stopStatus = AudioOutputUnitStop(audioUnit)
-            if stopStatus != noErr {
-                failures.append("stop AUHAL (\(stopStatus))")
-            }
-            isStarted = false
-        }
-
-        let uninitializeStatus = AudioUnitUninitialize(audioUnit)
-        if uninitializeStatus != noErr && uninitializeStatus != kAudioUnitErr_Uninitialized {
-            failures.append("uninitialize AUHAL (\(uninitializeStatus))")
-        }
-
-        let disposeStatus = AudioComponentInstanceDispose(audioUnit)
-        if disposeStatus != noErr {
-            failures.append("dispose AUHAL (\(disposeStatus))")
-        }
-
-        self.audioUnit = nil
-        renderContext = nil
-        return failures
-    }
-
     static func makeClientFormat(
         sampleRate: Double,
         channelCount: Int
@@ -417,7 +537,8 @@ final class AUHALPlaythrough {
         return AudioStreamBasicDescription(
             mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagsNativeFloatPacked | kAudioFormatFlagIsNonInterleaved,
+            mFormatFlags: kAudioFormatFlagsNativeFloatPacked
+                | kAudioFormatFlagIsNonInterleaved,
             mBytesPerPacket: bytesPerSample,
             mFramesPerPacket: 1,
             mBytesPerFrame: bytesPerSample,
@@ -426,102 +547,4 @@ final class AUHALPlaythrough {
             mReserved: 0
         )
     }
-}
-
-private final class AUHALRenderContext {
-    private let audioUnit: AudioUnit
-    private let inputBuffer: AVAudioPCMBuffer
-    private let outputChannelCount: Int
-
-    init(
-        audioUnit: AudioUnit,
-        inputBuffer: AVAudioPCMBuffer,
-        outputChannelCount: Int
-    ) {
-        self.audioUnit = audioUnit
-        self.inputBuffer = inputBuffer
-        self.outputChannelCount = outputChannelCount
-    }
-
-    func render(
-        actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
-        timestamp: UnsafePointer<AudioTimeStamp>,
-        frameCount: UInt32,
-        outputData: UnsafeMutablePointer<AudioBufferList>
-    ) -> OSStatus {
-        let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
-        clear(outputBuffers: outputBuffers)
-
-        guard frameCount <= inputBuffer.frameCapacity else {
-            actionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
-            return kAudio_ParamError
-        }
-
-        inputBuffer.frameLength = frameCount
-        let renderStatus = AudioUnitRender(
-            audioUnit,
-            actionFlags,
-            timestamp,
-            1,
-            frameCount,
-            inputBuffer.mutableAudioBufferList
-        )
-        guard renderStatus == noErr, let inputChannels = inputBuffer.floatChannelData else {
-            actionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
-            return renderStatus
-        }
-
-        let inputChannelCount = Int(inputBuffer.format.channelCount)
-        let byteCount = Int(frameCount) * MemoryLayout<Float32>.size
-        for outputIndex in 0..<min(outputBuffers.count, outputChannelCount) {
-            guard let sourceIndex = sourceChannelIndex(
-                outputIndex: outputIndex,
-                inputChannelCount: inputChannelCount
-            ),
-            let destination = outputBuffers[outputIndex].mData else {
-                continue
-            }
-            memcpy(destination, inputChannels[sourceIndex], byteCount)
-            outputBuffers[outputIndex].mDataByteSize = UInt32(byteCount)
-        }
-        return noErr
-    }
-
-    private func sourceChannelIndex(
-        outputIndex: Int,
-        inputChannelCount: Int
-    ) -> Int? {
-        if inputChannelCount == 1 {
-            return outputIndex < 2 ? 0 : nil
-        }
-        return outputIndex < inputChannelCount ? outputIndex : nil
-    }
-
-    private func clear(outputBuffers: UnsafeMutableAudioBufferListPointer) {
-        for index in outputBuffers.indices {
-            guard let destination = outputBuffers[index].mData else { continue }
-            memset(destination, 0, Int(outputBuffers[index].mDataByteSize))
-        }
-    }
-}
-
-private let auHALPlaythroughRenderCallback: AURenderCallback = {
-    referenceContext,
-    actionFlags,
-    timestamp,
-    _,
-    frameCount,
-    outputData in
-    guard let outputData else {
-        return kAudio_ParamError
-    }
-    let context = Unmanaged<AUHALRenderContext>
-        .fromOpaque(referenceContext)
-        .takeUnretainedValue()
-    return context.render(
-        actionFlags: actionFlags,
-        timestamp: timestamp,
-        frameCount: frameCount,
-        outputData: outputData
-    )
 }

@@ -3,7 +3,24 @@ import os
 
 private let logger = Logger(subsystem: "com.screambar.app", category: "ProcessManager")
 
+enum ProcessTerminationFailure: LocalizedError {
+    case timedOut(pid: Int32)
+    case signalFailed(pid: Int32, signal: Int32, errorCode: Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .timedOut(let pid):
+            return "Process \(pid) did not terminate within the bounded shutdown interval"
+        case .signalFailed(let pid, let signal, let errorCode):
+            return "Failed to send signal \(signal) to process \(pid) (errno \(errorCode))"
+        }
+    }
+}
+
 final class ProcessManager: @unchecked Sendable {
+    private static let gracefulTerminationTimeoutSeconds = 3.0
+    private static let forcedTerminationTimeoutSeconds = 2.0
+    private static let terminationPollNanoseconds: UInt64 = 20_000_000
     private var process: Process?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
@@ -47,6 +64,10 @@ final class ProcessManager: @unchecked Sendable {
         proc.terminationHandler = { [weak self] process in
             guard let self else { return }
             self.lock.lock()
+            guard self.process === process else {
+                self.lock.unlock()
+                return
+            }
             self.isRunning = false
             self.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
             self.stderrPipe?.fileHandleForReading.readabilityHandler = nil
@@ -80,32 +101,111 @@ final class ProcessManager: @unchecked Sendable {
         logger.info("Sending SIGINT to PID=\(pid)")
         proc.interrupt()
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            guard let self else { return }
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + Self.gracefulTerminationTimeoutSeconds
+        ) { [weak self, weak proc] in
+            guard let self, let proc else { return }
+            let shouldForceTerminate: Bool
             self.lock.lock()
-            let stillRunning = self.isRunning
+            shouldForceTerminate = self.process === proc && self.isRunning
             self.lock.unlock()
 
-            if stillRunning {
-                logger.warning("Process did not exit after 3s, sending SIGKILL to PID=\(pid)")
-                kill(pid, SIGKILL)
+            guard shouldForceTerminate else { return }
+            logger.warning("Process did not exit after SIGINT, sending SIGKILL to PID=\(pid)")
+            if kill(pid, SIGKILL) != 0, errno != ESRCH {
+                logger.error("Failed to send SIGKILL to PID=\(pid), errno=\(errno)")
             }
         }
     }
 
+    func stopAndWait() async throws -> Int32? {
+        guard let process = currentRunningProcess() else { return nil }
+        let pid = process.processIdentifier
+        logger.info("Sending SIGINT to PID=\(pid)")
+        process.interrupt()
+        if let status = try await waitForTermination(
+            process,
+            timeoutSeconds: Self.gracefulTerminationTimeoutSeconds
+        ) {
+            return status
+        }
+
+        logger.warning("Process did not exit after SIGINT; sending SIGKILL to PID=\(pid)")
+        guard kill(pid, SIGKILL) == 0 || errno == ESRCH else {
+            throw ProcessTerminationFailure.signalFailed(
+                pid: pid,
+                signal: SIGKILL,
+                errorCode: errno
+            )
+        }
+        if let status = try await waitForTermination(
+            process,
+            timeoutSeconds: Self.forcedTerminationTimeoutSeconds
+        ) {
+            return status
+        }
+        throw ProcessTerminationFailure.timedOut(pid: pid)
+    }
+
+    func forceTerminateAndWait() async throws -> Int32? {
+        guard let process = currentRunningProcess() else { return nil }
+        let pid = process.processIdentifier
+        guard kill(pid, SIGKILL) == 0 || errno == ESRCH else {
+            throw ProcessTerminationFailure.signalFailed(
+                pid: pid,
+                signal: SIGKILL,
+                errorCode: errno
+            )
+        }
+        guard let status = try await waitForTermination(
+            process,
+            timeoutSeconds: Self.forcedTerminationTimeoutSeconds
+        ) else {
+            throw ProcessTerminationFailure.timedOut(pid: pid)
+        }
+        return status
+    }
+
     func forceTerminate() {
         lock.lock()
-        defer { lock.unlock() }
-        if let proc = process, isRunning {
-            proc.terminationHandler = nil
-            stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-            stderrPipe?.fileHandleForReading.readabilityHandler = nil
-            kill(proc.processIdentifier, SIGKILL)
+        let runningProcess = process
+        let shouldTerminate = isRunning
+        lock.unlock()
+        if let runningProcess, shouldTerminate {
+            let pid = runningProcess.processIdentifier
+            if kill(pid, SIGKILL) != 0, errno != ESRCH {
+                logger.error("Failed to force-terminate PID=\(pid), errno=\(errno)")
+            }
         }
-        isRunning = false
-        process = nil
-        stdoutPipe = nil
-        stderrPipe = nil
+    }
+
+    private func currentRunningProcess() -> Process? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isRunning else { return nil }
+        return process
+    }
+
+    private func waitForTermination(
+        _ expectedProcess: Process,
+        timeoutSeconds: Double
+    ) async throws -> Int32? {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(timeoutSeconds))
+        while clock.now < deadline {
+            try Task.checkCancellation()
+            if hasTerminated(expectedProcess) {
+                return expectedProcess.terminationStatus
+            }
+            try await Task.sleep(nanoseconds: Self.terminationPollNanoseconds)
+        }
+        return nil
+    }
+
+    private func hasTerminated(_ expectedProcess: Process) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return process !== expectedProcess || !isRunning
     }
 
     private func setupOutputHandler(pipe: Pipe) {

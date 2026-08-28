@@ -6,11 +6,17 @@ struct CoreAudioBackendFailure: LocalizedError {
     let status: OSStatus
 
     var errorDescription: String? {
-        let fourCC = Self.fourCCDescription(for: status)
-        return "\(operation) failed with OSStatus \(status) (\(fourCC))"
+        return "\(operation) failed with \(Self.statusDescription(for: status))"
     }
 
-    private static func fourCCDescription(for status: OSStatus) -> String {
+    static func statusDescription(for status: OSStatus) -> String {
+        if status == kAudioHardwareUnspecifiedError {
+            return "kAudioHardwareUnspecifiedError ('what')"
+        }
+        return "OSStatus \(status) (\(fourCCDescription(for: status)))"
+    }
+
+    static func fourCCDescription(for status: OSStatus) -> String {
         let statusValue = UInt32(bitPattern: status)
         let characters = [
             UInt8((statusValue >> 24) & 0xFF),
@@ -26,6 +32,31 @@ struct CoreAudioBackendFailure: LocalizedError {
 }
 
 enum CoreAudioPropertyReader {
+    static func selectorDescription(_ selector: AudioObjectPropertySelector) -> String {
+        switch selector {
+        case kAudioHardwarePropertyDevices:
+            return "device list"
+        case kAudioHardwarePropertyDefaultInputDevice:
+            return "default input device"
+        case kAudioHardwarePropertyDefaultOutputDevice:
+            return "default output device"
+        case kAudioDevicePropertyDeviceIsAlive:
+            return "device alive state"
+        case kAudioDevicePropertyNominalSampleRate:
+            return "nominal sample rate"
+        case kAudioDevicePropertyAvailableNominalSampleRates:
+            return "available nominal sample rates"
+        case kAudioDevicePropertyBufferFrameSize:
+            return "buffer frame size"
+        case kAudioDevicePropertyBufferFrameSizeRange:
+            return "buffer frame size range"
+        case kAudioDevicePropertyStreamConfiguration:
+            return "stream configuration"
+        default:
+            return "CoreAudio property"
+        }
+    }
+
     static func hasProperty(
         objectID: AudioObjectID,
         address: AudioObjectPropertyAddress
@@ -113,6 +144,37 @@ enum CoreAudioPropertyReader {
             )
         }
         return value.takeRetainedValue() as String
+    }
+
+    static func readDictionary(
+        objectID: AudioObjectID,
+        address: AudioObjectPropertyAddress
+    ) throws -> [String: Any] {
+        var value: Unmanaged<CFDictionary>?
+        var dataSize = UInt32(MemoryLayout<CFDictionary?>.size)
+        var mutableAddress = address
+        let status = AudioObjectGetPropertyData(
+            objectID,
+            &mutableAddress,
+            0,
+            nil,
+            &dataSize,
+            &value
+        )
+        guard status == noErr, let value else {
+            throw CoreAudioBackendFailure(
+                operation: "Read dictionary property selector \(address.mSelector) from object \(objectID)",
+                status: status
+            )
+        }
+        let dictionary = value.takeRetainedValue() as NSDictionary
+        guard let bridgedDictionary = dictionary as? [String: Any] else {
+            throw CoreAudioBackendFailure(
+                operation: "Bridge dictionary property selector \(address.mSelector) from object \(objectID)",
+                status: kAudioHardwareUnspecifiedError
+            )
+        }
+        return bridgedDictionary
     }
 
     static func readChannelCount(

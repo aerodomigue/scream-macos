@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct LogView: View {
+    private static let sourceColumnWidth: CGFloat = 68
+
     @ObservedObject var logStore: RollingLogStore
 
     var body: some View {
@@ -53,7 +55,9 @@ struct LogView: View {
             Text("[\(entry.source.rawValue)]")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(sourceColor(entry.source))
-                .frame(width: 60, alignment: .leading)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(width: Self.sourceColumnWidth, alignment: .leading)
 
             Text(entry.message)
                 .font(.system(size: 11, design: .monospaced))

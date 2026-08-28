@@ -71,7 +71,10 @@ final class JackService: ObservableObject {
 
         if checkExternalJack() {
             logger.info("External JACK server detected, attaching")
-            logStore?.append(source: .jack, message: "External JACK server detected — attaching (will stop on request)")
+            logStore?.append(
+                source: .jack,
+                message: "External JACK server detected — attaching without taking ownership"
+            )
             weStartedJack = false
             status = .running
             return
@@ -101,9 +104,27 @@ final class JackService: ObservableObject {
         if weStartedJack {
             processManager.stop()
         } else {
-            pkill(signal: "-TERM")
-            weStartedJack = false
+            logStore?.append(source: .jack, message: "Detached from external JACK server")
             status = .stopped
+        }
+    }
+
+    func stopAndWait() async throws {
+        status = .stopping
+        logStore?.append(source: .jack, message: "Stopping jackd with termination barrier")
+        guard weStartedJack else {
+            status = .stopped
+            logStore?.append(source: .jack, message: "Detached from external JACK server")
+            return
+        }
+        let terminationStatus = try await processManager.stopAndWait()
+        weStartedJack = false
+        status = .stopped
+        if let terminationStatus {
+            logStore?.append(
+                source: .jack,
+                message: "jackd termination confirmed with status \(terminationStatus)"
+            )
         }
     }
 
@@ -114,18 +135,14 @@ final class JackService: ObservableObject {
         if weStartedJack {
             processManager.forceTerminate()
         } else {
-            pkill(signal: "-9")
+            status = .stopped
         }
-        weStartedJack = false
-        status = .stopped
     }
 
-    func terminateNow() {
+    func terminateAndWait() async throws {
         status = .stopping
         if weStartedJack {
-            processManager.forceTerminate()
-        } else {
-            pkill(signal: "-9")
+            _ = try await processManager.forceTerminateAndWait()
         }
         weStartedJack = false
         status = .stopped
@@ -133,32 +150,16 @@ final class JackService: ObservableObject {
 
     func prepareForWakeRestart() {
         status = .stopping
-        processManager.forceTerminate()
-        pkill(signal: "-9")
-        weStartedJack = false
-        status = .stopped
-        logStore?.append(source: .jack, message: "Force-killed lingering jackd for wake restart")
+        if weStartedJack {
+            processManager.forceTerminate()
+        } else {
+            status = .stopped
+        }
+        logStore?.append(source: .jack, message: "Requested JACK shutdown for wake restart")
     }
 
     var isProcessRunning: Bool {
         processManager.isRunning
-    }
-
-    private func pkill(signal: String) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = [signal, "-f", "jackd"]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        do {
-            try task.run()
-        } catch {
-            logger.error("Failed to run pkill for JACK: \(error.localizedDescription)")
-            logStore?.append(
-                source: .jack,
-                message: "Failed to run pkill for JACK: \(error.localizedDescription)"
-            )
-        }
     }
 
     private func cleanStaleMetadata() {

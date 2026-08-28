@@ -12,8 +12,8 @@ enum NominalSampleRateNegotiator {
         inputUID: AudioDeviceUID,
         outputUID: AudioDeviceUID
     ) throws -> Double {
-        let normalizedInputRanges = normalize(inputRanges)
-        let normalizedOutputRanges = normalize(outputRanges)
+        let normalizedInputRanges = normalizedRanges(inputRanges)
+        let normalizedOutputRanges = normalizedRanges(outputRanges)
         let commonRanges = intersections(normalizedInputRanges, normalizedOutputRanges)
 
         guard !commonRanges.isEmpty else {
@@ -66,7 +66,7 @@ enum NominalSampleRateNegotiator {
         abs(leftRate - rightRate) <= comparisonTolerance
     }
 
-    private static func normalize(
+    static func normalizedRanges(
         _ ranges: [NominalSampleRateRange]
     ) -> [NominalSampleRateRange] {
         let validRanges = ranges.compactMap { range -> NominalSampleRateRange? in
@@ -113,7 +113,7 @@ enum NominalSampleRateNegotiator {
                 return NominalSampleRateRange(minimum: minimumRate, maximum: maximumRate)
             }
         }
-        return normalize(ranges)
+        return normalizedRanges(ranges)
     }
 
     private static func contains(

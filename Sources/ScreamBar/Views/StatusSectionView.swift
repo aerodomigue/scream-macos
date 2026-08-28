@@ -5,10 +5,19 @@ struct StatusSectionView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        if viewModel.applicationMode == .scream {
-            screamStatus
-        } else {
-            directRoutingStatus
+        VStack(spacing: 0) {
+            if viewModel.applicationMode == .scream {
+                screamStatus
+            } else {
+                directRoutingStatus
+            }
+            if let transitionError = viewModel.audioModeCoordinator.transitionError {
+                Text(transitionError.localizedDescription)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
         }
     }
 
@@ -17,7 +26,7 @@ struct StatusSectionView: View {
             StatusRow(
                 serviceName: "JACK Server",
                 status: viewModel.jackService.status,
-                onStart: { viewModel.jackService.start(configuration: viewModel.configuration) },
+                onStart: { viewModel.startJack() },
                 onStop: {
                     if NSEvent.modifierFlags.contains(.shift) {
                         viewModel.jackService.forceStop()
@@ -30,7 +39,7 @@ struct StatusSectionView: View {
             StatusRow(
                 serviceName: "Scream Receiver",
                 status: viewModel.screamService.status,
-                onStart: { viewModel.screamService.start(configuration: viewModel.configuration) },
+                onStart: { viewModel.startScream() },
                 onStop: { viewModel.screamService.stop() }
             )
 

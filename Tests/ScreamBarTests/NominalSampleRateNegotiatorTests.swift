@@ -67,6 +67,22 @@ final class NominalSampleRateNegotiatorTests: XCTestCase {
         }
     }
 
+    func testEquivalentReorderedRangesNormalizeToSameSnapshotValue() {
+        let first = [
+            NominalSampleRateRange(minimum: 48_000, maximum: 96_000),
+            NominalSampleRateRange(minimum: 44_100, maximum: 48_000),
+        ]
+        let reorderedAndSplit = [
+            NominalSampleRateRange(minimum: 60_000, maximum: 96_000),
+            NominalSampleRateRange(minimum: 44_100, maximum: 60_000),
+        ]
+
+        XCTAssertEqual(
+            NominalSampleRateNegotiator.normalizedRanges(first),
+            NominalSampleRateNegotiator.normalizedRanges(reorderedAndSplit)
+        )
+    }
+
     private func negotiate(
         inputRanges: [NominalSampleRateRange],
         outputRanges: [NominalSampleRateRange],

@@ -2,6 +2,8 @@ import SwiftUI
 
 @main
 struct ScreamBarApp: App {
+    @NSApplicationDelegateAdaptor(ScreamBarApplicationDelegate.self)
+    private var applicationDelegate
     @StateObject private var viewModel = AppViewModel()
 
     var body: some Scene {

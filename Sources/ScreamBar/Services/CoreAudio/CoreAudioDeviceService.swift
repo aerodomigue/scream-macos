@@ -7,6 +7,16 @@ private let coreAudioServiceLogger = Logger(
     category: "CoreAudioDeviceService"
 )
 
+struct CoreAudioServiceTiming {
+    let sleep: (UInt64) async throws -> Void
+
+    static let live = CoreAudioServiceTiming(
+        sleep: { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        }
+    )
+}
+
 @MainActor
 final class CoreAudioDeviceService: ObservableObject {
     private struct PreparationSignature {
@@ -15,7 +25,11 @@ final class CoreAudioDeviceService: ObservableObject {
         let nominalSampleRate: Double
         let inputRanges: [NominalSampleRateRange]
         let outputRanges: [NominalSampleRateRange]
-        let requestedBufferFrameSize: UInt32?
+    }
+
+    private struct PreparationWaiter {
+        let token: UUID
+        let continuation: CheckedContinuation<Void, Never>
     }
 
     private static let hardwareChangeDebounceNanoseconds: UInt64 = 200_000_000
@@ -32,18 +46,24 @@ final class CoreAudioDeviceService: ObservableObject {
     var onHardwareChanged: (() -> Void)?
 
     private let backend: any CoreAudioBackend
+    private let timing: CoreAudioServiceTiming
     private weak var logStore: RollingLogStore?
     private var revision: UInt64 = 0
     private var refreshTask: Task<Void, Never>?
-    private var isPreparingRoute = false
+    private var activePreparationToken: UUID?
+    private var preparationWaiters: [PreparationWaiter] = []
     private var hasDeferredHardwareChange = false
+    private var pendingCleanupSessionIDs = Set<UUID>()
+    private(set) var isShuttingDown = false
 
     init(
         logStore: RollingLogStore,
-        backend: (any CoreAudioBackend)? = nil
+        backend: (any CoreAudioBackend)? = nil,
+        timing: CoreAudioServiceTiming = .live
     ) {
         self.logStore = logStore
         self.backend = backend ?? CoreAudioBackendFactory.makeBackend()
+        self.timing = timing
         self.backend.onHardwareChanged = { [weak self] in
             self?.scheduleHardwareRefresh()
         }
@@ -67,32 +87,17 @@ final class CoreAudioDeviceService: ObservableObject {
     func prepareRoute(
         inputSelection: AudioDeviceSelection,
         outputSelection: AudioDeviceSelection,
-        requestedBufferFrameSize: UInt32? = nil
+        requestedBufferFrameSize: UInt32? = nil,
+        preparationToken: UUID = UUID(),
+        isRevisionCurrent: @escaping () -> Bool = { true }
     ) async throws -> PreparedAudioRoute {
-        var expectedSignature: PreparationSignature?
-        isPreparingRoute = true
-        defer {
-            isPreparingRoute = false
-            let hadDeferredHardwareChange = hasDeferredHardwareChange
-            hasDeferredHardwareChange = false
-            do {
-                try backend.rebuildListeners()
-                let snapshotChanged = try refreshSnapshot(notifyRoute: false)
-                if expectedSignature != nil {
-                    if routeChanged(
-                        inputSelection: inputSelection,
-                        outputSelection: outputSelection,
-                        expectedSignature: expectedSignature
-                    ) {
-                        onHardwareChanged?()
-                    }
-                } else if hadDeferredHardwareChange && snapshotChanged {
-                    onHardwareChanged?()
-                }
-            } catch {
-                report("Failed to refresh CoreAudio after route preparation: \(error.localizedDescription)")
-            }
-        }
+        try await acquirePreparationOwnership(preparationToken)
+        defer { releasePreparationOwnership(preparationToken) }
+        try validatePreparationOwnership(
+            preparationToken,
+            isRevisionCurrent: isRevisionCurrent
+        )
+        try retryPendingRouteCleanups()
 
         try refreshSnapshot(notifyRoute: false)
         let resolution = try resolveRoute(
@@ -115,28 +120,39 @@ final class CoreAudioDeviceService: ObservableObject {
                 output: outputDevice
             )
         }
-        expectedSignature = PreparationSignature(
+        let expectedSignature = PreparationSignature(
             inputUID: inputDevice.id,
             outputUID: outputDevice.id,
             nominalSampleRate: nominalSampleRate,
             inputRanges: inputDevice.supportedNominalSampleRates,
-            outputRanges: outputDevice.supportedNominalSampleRates,
-            requestedBufferFrameSize: requestedBufferFrameSize
+            outputRanges: outputDevice.supportedNominalSampleRates
         )
+
+        let validateOwnership = { [weak self] in
+            guard let self else { throw CancellationError() }
+            try self.validatePreparationOwnership(
+                preparationToken,
+                isRevisionCurrent: isRevisionCurrent
+            )
+        }
 
         try await configureAndVerifySampleRate(
             nominalSampleRate,
             for: outputDevice.id,
-            operation: "output"
+            operation: "output",
+            validateOwnership: validateOwnership
         )
+        try validateOwnership()
         if inputDevice.id != outputDevice.id {
             try await configureAndVerifySampleRate(
                 nominalSampleRate,
                 for: inputDevice.id,
-                operation: "input"
+                operation: "input",
+                validateOwnership: validateOwnership
             )
         }
 
+        try validateOwnership()
         guard try backend.isAlive(uid: inputDevice.id) else {
             throw AudioRoutingError.inputDeviceUnavailable(inputDevice.id)
         }
@@ -146,12 +162,16 @@ final class CoreAudioDeviceService: ObservableObject {
 
         let sessionID: UUID
         do {
+            try validateOwnership()
             sessionID = try backend.prepareRoute(
                 input: inputDevice,
                 output: outputDevice,
                 nominalSampleRate: nominalSampleRate,
-                requestedBufferFrameSize: requestedBufferFrameSize
+                requestedBufferFrameSize: requestedBufferFrameSize,
+                validateOwnership: validateOwnership
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let failure as LegacyRouteFailure {
             throw map(
                 failure,
@@ -179,6 +199,42 @@ final class CoreAudioDeviceService: ObservableObject {
             )
         }
 
+        do {
+            try validateOwnership()
+            try backend.rebuildListeners()
+            try refreshSnapshot(notifyRoute: false)
+            try validateOwnership()
+            try validateFinalRoute(
+                inputSelection: inputSelection,
+                outputSelection: outputSelection,
+                expectedSignature: expectedSignature
+            )
+        } catch {
+            let cleanupFailures = backend.stopAndDestroyRoute(sessionID: sessionID)
+            if cleanupFailures.isEmpty {
+                pendingCleanupSessionIDs.remove(sessionID)
+            } else {
+                pendingCleanupSessionIDs.insert(sessionID)
+                cleanupFailures.forEach {
+                    report("Post-validation cleanup failed: \($0)")
+                }
+            }
+            if error is CancellationError {
+                throw error
+            }
+            if let routingError = error as? AudioRoutingError {
+                throw routingError
+            }
+            report("Final route validation failed: \(error.localizedDescription)")
+            throw AudioRoutingError.finalRouteValidationFailed(
+                makeAUHALContext(
+                    input: inputDevice,
+                    output: outputDevice,
+                    nominalSampleRate: nominalSampleRate
+                )
+            )
+        }
+
         return PreparedAudioRoute(
             sessionID: sessionID,
             route: EffectiveAudioRoute(
@@ -190,7 +246,13 @@ final class CoreAudioDeviceService: ObservableObject {
         )
     }
 
-    func startRoute(_ preparedRoute: PreparedAudioRoute) throws {
+    func startRoute(
+        _ preparedRoute: PreparedAudioRoute,
+        isRevisionCurrent: () -> Bool = { true }
+    ) throws {
+        guard !isShuttingDown, isRevisionCurrent(), !Task.isCancelled else {
+            throw CancellationError()
+        }
         do {
             try backend.startRoute(sessionID: preparedRoute.sessionID)
         } catch let failure as AUHALSetupFailure {
@@ -217,16 +279,25 @@ final class CoreAudioDeviceService: ObservableObject {
     func stopAndDestroyRoute(sessionID: UUID) throws {
         let cleanupFailures = backend.stopAndDestroyRoute(sessionID: sessionID)
         guard cleanupFailures.isEmpty else {
+            pendingCleanupSessionIDs.insert(sessionID)
             cleanupFailures.forEach { report($0) }
             throw AudioRoutingError.cleanupFailed(cleanupFailures)
         }
+        pendingCleanupSessionIDs.remove(sessionID)
     }
 
-    func shutdown() {
+    @discardableResult
+    func shutdown() -> [String] {
+        guard !isShuttingDown else { return [] }
+        isShuttingDown = true
         refreshTask?.cancel()
         refreshTask = nil
+        let waitingContinuations = preparationWaiters.map(\.continuation)
+        preparationWaiters.removeAll()
+        waitingContinuations.forEach { $0.resume() }
         let cleanupFailures = backend.shutdown()
         cleanupFailures.forEach { report($0) }
+        return cleanupFailures
     }
 
     private func resolveRoute(
@@ -293,7 +364,8 @@ final class CoreAudioDeviceService: ObservableObject {
     private func configureAndVerifySampleRate(
         _ sampleRate: Double,
         for uid: AudioDeviceUID,
-        operation: String
+        operation: String,
+        validateOwnership: () throws -> Void
     ) async throws {
         let currentRate: Double
         do {
@@ -312,6 +384,7 @@ final class CoreAudioDeviceService: ObservableObject {
 
         guard !NominalSampleRateNegotiator.ratesMatch(currentRate, sampleRate) else { return }
 
+        try validateOwnership()
         do {
             try backend.setNominalSampleRate(sampleRate, for: uid)
         } catch {
@@ -347,7 +420,8 @@ final class CoreAudioDeviceService: ObservableObject {
                 return
             }
             do {
-                try await Task.sleep(nanoseconds: Self.ratePollNanoseconds)
+                try await timing.sleep(Self.ratePollNanoseconds)
+                try validateOwnership()
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -367,7 +441,8 @@ final class CoreAudioDeviceService: ObservableObject {
     }
 
     private func scheduleHardwareRefresh() {
-        if isPreparingRoute {
+        guard !isShuttingDown else { return }
+        if activePreparationToken != nil {
             hasDeferredHardwareChange = true
             return
         }
@@ -375,7 +450,7 @@ final class CoreAudioDeviceService: ObservableObject {
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             do {
-                try await Task.sleep(nanoseconds: Self.hardwareChangeDebounceNanoseconds)
+                try await self?.timing.sleep(Self.hardwareChangeDebounceNanoseconds)
             } catch is CancellationError {
                 return
             } catch {
@@ -383,7 +458,8 @@ final class CoreAudioDeviceService: ObservableObject {
                 return
             }
             guard let self else { return }
-            guard !self.isPreparingRoute else {
+            guard !self.isShuttingDown else { return }
+            guard self.activePreparationToken == nil else {
                 self.hasDeferredHardwareChange = true
                 return
             }
@@ -396,50 +472,127 @@ final class CoreAudioDeviceService: ObservableObject {
         }
     }
 
-    private func routeChanged(
+    private func validateFinalRoute(
         inputSelection: AudioDeviceSelection,
         outputSelection: AudioDeviceSelection,
-        expectedSignature: PreparationSignature?
-    ) -> Bool {
-        guard let expectedSignature else { return true }
-        do {
-            let resolution = try resolveRoute(
-                inputSelection: inputSelection,
-                outputSelection: outputSelection
-            )
-            return resolution.input.id != expectedSignature.inputUID
-                || resolution.output.id != expectedSignature.outputUID
-                || !NominalSampleRateNegotiator.ratesMatch(
-                    resolution.input.currentNominalSampleRate,
-                    expectedSignature.nominalSampleRate
-                )
-                || !NominalSampleRateNegotiator.ratesMatch(
-                    resolution.output.currentNominalSampleRate,
-                    expectedSignature.nominalSampleRate
-                )
-                || resolution.input.supportedNominalSampleRates != expectedSignature.inputRanges
-                || resolution.output.supportedNominalSampleRates != expectedSignature.outputRanges
-                || bufferFrameSizeChanged(
-                    resolution: resolution,
-                    requestedFrameCount: expectedSignature.requestedBufferFrameSize
-                )
-        } catch {
-            report("Route changed while preparing: \(error.localizedDescription)")
-            return true
-        }
-    }
-
-    private func bufferFrameSizeChanged(
-        resolution: (
+        expectedSignature: PreparationSignature
+    ) throws {
+        let context = AUHALContext(
+            inputUID: expectedSignature.inputUID,
+            outputUID: expectedSignature.outputUID,
+            nominalSampleRate: expectedSignature.nominalSampleRate
+        )
+        let resolution: (
             input: AudioDeviceDescriptor,
             output: AudioDeviceDescriptor,
             isUsingOutputFallback: Bool
-        ),
-        requestedFrameCount: UInt32?
-    ) -> Bool {
-        guard let requestedFrameCount else { return false }
-        return resolution.input.currentBufferFrameSize != requestedFrameCount
-            || resolution.output.currentBufferFrameSize != requestedFrameCount
+        )
+        do {
+            resolution = try resolveRoute(
+                inputSelection: inputSelection,
+                outputSelection: outputSelection
+            )
+        } catch {
+            throw AudioRoutingError.finalRouteValidationFailed(context)
+        }
+        let inputRanges = NominalSampleRateNegotiator.normalizedRanges(
+            resolution.input.supportedNominalSampleRates
+        )
+        let outputRanges = NominalSampleRateNegotiator.normalizedRanges(
+            resolution.output.supportedNominalSampleRates
+        )
+        let expectedInputRanges = NominalSampleRateNegotiator.normalizedRanges(
+            expectedSignature.inputRanges
+        )
+        let expectedOutputRanges = NominalSampleRateNegotiator.normalizedRanges(
+            expectedSignature.outputRanges
+        )
+        guard resolution.input.id == expectedSignature.inputUID,
+              resolution.output.id == expectedSignature.outputUID,
+              NominalSampleRateNegotiator.ratesMatch(
+                  resolution.input.currentNominalSampleRate,
+                  expectedSignature.nominalSampleRate
+              ),
+              NominalSampleRateNegotiator.ratesMatch(
+                  resolution.output.currentNominalSampleRate,
+                  expectedSignature.nominalSampleRate
+              ),
+              inputRanges == expectedInputRanges,
+              outputRanges == expectedOutputRanges else {
+            throw AudioRoutingError.finalRouteValidationFailed(context)
+        }
+    }
+
+    private func acquirePreparationOwnership(_ token: UUID) async throws {
+        guard !isShuttingDown else {
+            throw AudioRoutingError.serviceShuttingDown
+        }
+        if activePreparationToken == nil {
+            activePreparationToken = token
+            return
+        }
+        await withCheckedContinuation { continuation in
+            preparationWaiters.append(
+                PreparationWaiter(token: token, continuation: continuation)
+            )
+        }
+        do {
+            try Task.checkCancellation()
+            guard !isShuttingDown, activePreparationToken == token else {
+                throw AudioRoutingError.serviceShuttingDown
+            }
+        } catch {
+            releasePreparationOwnership(token)
+            throw error
+        }
+    }
+
+    private func releasePreparationOwnership(_ token: UUID) {
+        guard activePreparationToken == token else { return }
+        if isShuttingDown {
+            activePreparationToken = nil
+            return
+        }
+        if !preparationWaiters.isEmpty {
+            let nextWaiter = preparationWaiters.removeFirst()
+            activePreparationToken = nextWaiter.token
+            nextWaiter.continuation.resume()
+            return
+        }
+        activePreparationToken = nil
+        if hasDeferredHardwareChange {
+            hasDeferredHardwareChange = false
+            scheduleHardwareRefresh()
+        }
+    }
+
+    private func validatePreparationOwnership(
+        _ token: UUID,
+        isRevisionCurrent: () -> Bool
+    ) throws {
+        try Task.checkCancellation()
+        guard !isShuttingDown else {
+            throw AudioRoutingError.serviceShuttingDown
+        }
+        guard activePreparationToken == token, isRevisionCurrent() else {
+            throw CancellationError()
+        }
+    }
+
+    private func retryPendingRouteCleanups() throws {
+        var failures: [String] = []
+        for sessionID in Array(pendingCleanupSessionIDs) {
+            let cleanupFailures = backend.stopAndDestroyRoute(sessionID: sessionID)
+            if cleanupFailures.isEmpty {
+                pendingCleanupSessionIDs.remove(sessionID)
+            } else {
+                failures.append(contentsOf: cleanupFailures)
+            }
+        }
+        guard failures.isEmpty else {
+            failures.forEach { report($0) }
+            throw AudioRoutingError.cleanupFailed(failures)
+        }
     }
 
     @discardableResult
@@ -450,6 +603,10 @@ final class CoreAudioDeviceService: ObservableObject {
         let snapshotChanged = !hardwareStateMatches(previousSnapshot, refreshedSnapshot)
         snapshot = refreshedSnapshot
         if notifyRoute && snapshotChanged {
+            reportDefaultOutputChange(
+                from: previousSnapshot,
+                to: refreshedSnapshot
+            )
             onHardwareChanged?()
         }
         return snapshotChanged
@@ -462,6 +619,32 @@ final class CoreAudioDeviceService: ObservableObject {
         first.devices == second.devices
             && first.defaultInputUID == second.defaultInputUID
             && first.defaultOutputUID == second.defaultOutputUID
+    }
+
+    private func reportDefaultOutputChange(
+        from previousSnapshot: AudioHardwareSnapshot,
+        to refreshedSnapshot: AudioHardwareSnapshot
+    ) {
+        guard previousSnapshot.defaultOutputUID != refreshedSnapshot.defaultOutputUID else {
+            return
+        }
+        let previousName = deviceName(
+            for: previousSnapshot.defaultOutputUID,
+            in: previousSnapshot
+        )
+        let refreshedName = deviceName(
+            for: refreshedSnapshot.defaultOutputUID,
+            in: refreshedSnapshot
+        )
+        inform("Default output changed: \(previousName) → \(refreshedName)")
+    }
+
+    private func deviceName(
+        for uid: AudioDeviceUID?,
+        in snapshot: AudioHardwareSnapshot
+    ) -> String {
+        guard let uid else { return "No default output" }
+        return snapshot.devices.first { $0.id == uid }?.name ?? "Unavailable output"
     }
 
     private func map(
@@ -522,6 +705,9 @@ final class CoreAudioDeviceService: ObservableObject {
                     nominalSampleRate: nominalSampleRate
                 )
             )
+        case .cleanup(let failures):
+            failures.forEach { report($0) }
+            return .cleanupFailed(failures)
         }
     }
 
@@ -551,6 +737,11 @@ final class CoreAudioDeviceService: ObservableObject {
 
     private func report(_ message: String) {
         coreAudioServiceLogger.error("\(message, privacy: .public)")
+        logStore?.append(source: .routing, message: message)
+    }
+
+    private func inform(_ message: String) {
+        coreAudioServiceLogger.info("\(message, privacy: .public)")
         logStore?.append(source: .routing, message: message)
     }
 }

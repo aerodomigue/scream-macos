@@ -38,6 +38,9 @@ build: ## Build release .app bundle
 	cp scream $(APP_BUNDLE)/Contents/Resources/scream
 	chmod +x $(APP_BUNDLE)/Contents/Resources/scream
 
+	@# Copy application icon
+	cp Resources/AppIcon.icns $(APP_BUNDLE)/Contents/Resources/AppIcon.icns
+
 	@# Copy dylibs
 	@for lib in $(DYLIBS); do \
 		if [ -f "$$lib" ]; then \
@@ -75,6 +78,7 @@ build: ## Build release .app bundle
 	/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $(BUNDLE_ID)" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :CFBundleName string $(APP_NAME)" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $(APP_NAME)" $(APP_BUNDLE)/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.0.0" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" $(APP_BUNDLE)/Contents/Info.plist

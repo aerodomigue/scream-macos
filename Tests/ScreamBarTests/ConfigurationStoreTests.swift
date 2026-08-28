@@ -3,6 +3,13 @@ import XCTest
 
 @MainActor
 final class ConfigurationStoreTests: XCTestCase {
+    func testJackArgumentsUseDynamicCoreAudioDeviceSelection() {
+        let arguments = ScreamConfiguration().buildJackArguments()
+
+        XCTAssertEqual(arguments.prefix(2), ["-d", "coreaudio"])
+        XCTAssertFalse(arguments.contains("-P"))
+    }
+
     private struct SchemaOneDirectRoutingConfiguration: Encodable {
         let inputSelection = AudioDeviceSelection.systemDefault
         let outputSelection = AudioDeviceSelection.systemDefault
