@@ -48,6 +48,7 @@ struct AUHALRetainedConstructionFailure: Error {
 struct AUHALTeardownOperations {
     let start: (AudioUnit) -> OSStatus
     let stop: (AudioUnit) -> OSStatus
+    let clearRenderCallback: (AudioUnit) -> OSStatus
     let uninitialize: (AudioUnit) -> OSStatus
     let dispose: (AudioUnit) -> OSStatus
     let destroyRenderContext: (OpaquePointer) -> Void
@@ -55,6 +56,17 @@ struct AUHALTeardownOperations {
     static let live = AUHALTeardownOperations(
         start: AudioOutputUnitStart,
         stop: AudioOutputUnitStop,
+        clearRenderCallback: { audioUnit in
+            var callback = AURenderCallbackStruct(inputProc: nil, inputProcRefCon: nil)
+            return AudioUnitSetProperty(
+                audioUnit,
+                kAudioUnitProperty_SetRenderCallback,
+                kAudioUnitScope_Input,
+                AUHALPlaythroughTopology.outputElement,
+                &callback,
+                UInt32(MemoryLayout<AURenderCallbackStruct>.size)
+            )
+        },
         uninitialize: AudioUnitUninitialize,
         dispose: AudioComponentInstanceDispose,
         destroyRenderContext: { context in
@@ -235,39 +247,69 @@ final class AUHALPlaythrough {
         }
 
         if lifecycleState == .started {
+            auHALLogger.debug("Direct: stopping AUHAL")
             let stopStatus = teardownOperations.stop(audioUnit)
             guard stopStatus == noErr else {
-                return ["stop AUHAL (\(stopStatus))"]
+                return [teardownFailure(stage: "stopping AUHAL", status: stopStatus)]
             }
             lifecycleState = .stopped
+            auHALLogger.debug("Direct: AUHAL stopped")
+        }
+
+        if renderContext != nil {
+            auHALLogger.debug("Direct: removing render callback")
+            let callbackStatus = teardownOperations.clearRenderCallback(audioUnit)
+            if callbackStatus == noErr {
+                auHALLogger.debug("Direct: render callback removed")
+            } else {
+                auHALLogger.debug(
+                    "Direct: render callback removal failed: \(CoreAudioBackendFailure.statusDescription(for: callbackStatus), privacy: .public); disposal will invalidate the callback"
+                )
+            }
         }
 
         if lifecycleState == .initialized || lifecycleState == .stopped {
+            auHALLogger.debug("Direct: uninitializing AUHAL")
             let uninitializeStatus = teardownOperations.uninitialize(audioUnit)
             guard uninitializeStatus == noErr
                     || uninitializeStatus == kAudioUnitErr_Uninitialized else {
-                return ["uninitialize AUHAL (\(uninitializeStatus))"]
+                return [teardownFailure(stage: "uninitializing AUHAL", status: uninitializeStatus)]
             }
             lifecycleState = .uninitialized
+            auHALLogger.debug("Direct: AUHAL uninitialized")
         }
 
         if lifecycleState == .created || lifecycleState == .uninitialized {
+            auHALLogger.debug("Direct: disposing AUHAL")
             let disposeStatus = teardownOperations.dispose(audioUnit)
             guard disposeStatus == noErr else {
-                return ["dispose AUHAL (\(disposeStatus))"]
+                return [teardownFailure(stage: "disposing AUHAL", status: disposeStatus)]
             }
             lifecycleState = .disposed
             self.audioUnit = nil
+            auHALLogger.debug("Direct: AUHAL disposed")
             releaseRenderContext()
         }
 
-        return isFullyDisposed ? [] : ["AUHAL teardown stopped at \(lifecycleState)"]
+        guard isFullyDisposed else {
+            return ["Direct: AUHAL teardown stopped at \(lifecycleState)"]
+        }
+        auHALLogger.debug("Direct: teardown complete")
+        return []
     }
 
     private func releaseRenderContext() {
         guard let renderContext else { return }
+        auHALLogger.debug("Direct: releasing render context")
         teardownOperations.destroyRenderContext(renderContext)
         self.renderContext = nil
+        auHALLogger.debug("Direct: render context released")
+    }
+
+    private func teardownFailure(stage: String, status: OSStatus) -> String {
+        let message = "Direct: \(stage) failed: \(CoreAudioBackendFailure.statusDescription(for: status))"
+        auHALLogger.error("\(message, privacy: .public)")
+        return message
     }
 
     private func configure(

@@ -145,6 +145,36 @@ final class CoreAudioCoexistenceIntegrationTests: XCTestCase {
         )
     }
 
+    func testDirectRoutingTeardownReleasesAllRouteResources() async throws {
+        try requireHardwareIntegrationTests()
+        let backend = LegacyCoreAudioBackend()
+        let service = CoreAudioDeviceService(
+            logStore: RollingLogStore(),
+            backend: backend
+        )
+        var sessionID: UUID?
+        defer {
+            if let sessionID {
+                do {
+                    try service.stopAndDestroyRoute(sessionID: sessionID)
+                } catch {
+                    XCTFail("Route cleanup failed: \(error)")
+                }
+            }
+            service.shutdown()
+        }
+
+        let route = try await service.prepareRoute(
+            inputSelection: .systemDefault,
+            outputSelection: .systemDefault
+        )
+        sessionID = route.sessionID
+        try service.startRoute(route)
+        try service.stopAndDestroyRoute(sessionID: route.sessionID)
+        sessionID = nil
+        XCTAssertNoThrow(try service.confirmRouteResourcesReleased())
+    }
+
     private func requireHardwareIntegrationTests() throws {
         guard ProcessInfo.processInfo.environment[Self.integrationEnvironmentKey] == "1" else {
             throw XCTSkip(

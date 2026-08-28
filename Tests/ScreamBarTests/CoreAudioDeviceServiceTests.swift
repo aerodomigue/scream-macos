@@ -656,6 +656,33 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         XCTAssertEqual(backend.stoppedSessionIDs.count, 2)
     }
 
+    func testDirectStopDoesNotCompleteWhileBackendRetainsResources() async throws {
+        let device = makeDevice(uid: "duplex")
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(devices: [device], input: device, output: device)
+        )
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: makeService(backend: backend),
+            permissionService: AudioInputPermissionSpy()
+        )
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await routingService.waitForIdle()
+        backend.unreleasedResourceFailures = ["Direct: pending route resources remain registered"]
+
+        do {
+            try await routingService.stopAndWait()
+            XCTFail("Expected retained backend resources to block Direct teardown")
+        } catch AudioRoutingError.cleanupFailed {
+            XCTAssertEqual(
+                routingService.state,
+                .failed(.cleanupFailed(["Direct: pending route resources remain registered"]))
+            )
+        } catch {
+            XCTFail("Unexpected teardown error: \(error)")
+        }
+    }
+
     func testStartFailureRemainsPrimaryWhenItsCleanupAlsoFails() async throws {
         let device = makeDevice(uid: "duplex")
         let backend = CoreAudioBackendSpy(
@@ -759,6 +786,7 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
     var onPrepareRoute: (() -> Void)?
     var onMakeSnapshot: (() -> Void)?
     var cleanupFailureBatches: [[String]] = []
+    var unreleasedResourceFailures: [String] = []
     var startError: Error?
     private var rates: [AudioDeviceUID: Double]
 
@@ -857,6 +885,10 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
         stoppedSessionIDs.append(sessionID)
         guard !cleanupFailureBatches.isEmpty else { return [] }
         return cleanupFailureBatches.removeFirst()
+    }
+
+    func verifyRouteResourcesReleased() -> [String] {
+        unreleasedResourceFailures
     }
 
     func shutdown() -> [String] {

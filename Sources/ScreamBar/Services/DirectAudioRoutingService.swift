@@ -73,6 +73,18 @@ final class DirectAudioRoutingService: ObservableObject {
                 "Direct Routing cleanup did not release the active route",
             ])
         }
+        do {
+            try deviceService.confirmRouteResourcesReleased()
+        } catch let routingError as AudioRoutingError {
+            state = .failed(routingError)
+            throw routingError
+        } catch {
+            let routingError = AudioRoutingError.cleanupFailed([
+                "Direct Routing resource verification failed: \(error.localizedDescription)",
+            ])
+            state = .failed(routingError)
+            throw routingError
+        }
     }
 
     func configurationDidChange(_ configuration: DirectRoutingConfiguration) {
@@ -100,6 +112,11 @@ final class DirectAudioRoutingService: ObservableObject {
             } catch {
                 failures.append(error.localizedDescription)
             }
+        }
+        do {
+            try deviceService.confirmRouteResourcesReleased()
+        } catch {
+            failures.append(error.localizedDescription)
         }
         failures.append(contentsOf: deviceService.shutdown())
         state = failures.isEmpty ? .stopped : .failed(.cleanupFailed(failures))
@@ -149,7 +166,22 @@ final class DirectAudioRoutingService: ObservableObject {
 
         guard revision == desiredRevision else { return }
         guard desiredRunning else {
+            do {
+                try deviceService.confirmRouteResourcesReleased()
+            } catch let routingError as AudioRoutingError {
+                report("Direct Routing teardown failed: \(routingError.localizedDescription)")
+                state = .failed(routingError)
+                return
+            } catch {
+                let routingError = AudioRoutingError.cleanupFailed([
+                    "Direct Routing resource verification failed: \(error.localizedDescription)",
+                ])
+                report("Direct Routing teardown failed: \(routingError.localizedDescription)")
+                state = .failed(routingError)
+                return
+            }
             state = .stopped
+            report("Direct: teardown complete")
             return
         }
 

@@ -470,6 +470,17 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         return failures
     }
 
+    func verifyRouteResourcesReleased() -> [String] {
+        var failures = retryPendingCleanups()
+        if !routes.isEmpty {
+            failures.append("Direct: active route resources remain registered")
+        }
+        if !pendingCleanupRoutes.isEmpty {
+            failures.append("Direct: pending route resources remain registered")
+        }
+        return failures
+    }
+
     func shutdown() -> [String] {
         var failures: [String] = []
         for sessionID in Array(routes.keys) {
@@ -490,12 +501,18 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         }
 
         if let aggregateDeviceID = resources.aggregateDeviceID {
+            legacyCoreAudioLogger.debug(
+                "Direct: destroying aggregate device \(aggregateDeviceID)"
+            )
             let status = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
             guard status == noErr else {
-                failures.append("destroy aggregate (\(status))")
+                let message = "Direct: aggregate destruction failed: \(CoreAudioBackendFailure.statusDescription(for: status))"
+                legacyCoreAudioLogger.error("\(message, privacy: .public)")
+                failures.append(message)
                 return failures
             }
             resources.aggregateDeviceID = nil
+            legacyCoreAudioLogger.debug("Direct: aggregate destroyed")
         }
 
         failures.append(

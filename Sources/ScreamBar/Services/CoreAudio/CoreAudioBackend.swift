@@ -21,6 +21,7 @@ protocol CoreAudioBackend: AnyObject {
     ) throws -> UUID
     func startRoute(sessionID: UUID) throws
     func stopAndDestroyRoute(sessionID: UUID) -> [String]
+    func verifyRouteResourcesReleased() -> [String]
     func shutdown() -> [String]
 }
 

@@ -36,7 +36,7 @@ struct ScreamConfiguration: Codable, Equatable {
     }
 
     func buildJackArguments() -> [String] {
-        var arguments = ["-d", "coreaudio"]
+        var arguments = ["-d", "coreaudio", "-P"]
         if let jackSampleRate {
             arguments += ["-r", String(jackSampleRate)]
         }

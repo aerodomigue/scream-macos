@@ -9,7 +9,10 @@ final class AUHALTeardownTests: XCTestCase {
         let operations = TeardownOperationsSpy(stopStatuses: [Self.injectedFailure, noErr])
         let playthrough = makePlaythrough(state: .started, operations: operations)
 
-        XCTAssertEqual(playthrough.stopAndDispose(), ["stop AUHAL (-7001)"])
+        XCTAssertEqual(
+            playthrough.stopAndDispose(),
+            ["Direct: stopping AUHAL failed: OSStatus -7001 (non-printable)"]
+        )
         XCTAssertEqual(playthrough.lifecycleState, .started)
         XCTAssertFalse(playthrough.isFullyDisposed)
         XCTAssertEqual(operations.destroyContextCount, 0)
@@ -30,7 +33,7 @@ final class AUHALTeardownTests: XCTestCase {
 
         XCTAssertEqual(
             playthrough.stopAndDispose(),
-            ["uninitialize AUHAL (-7001)"]
+            ["Direct: uninitializing AUHAL failed: OSStatus -7001 (non-printable)"]
         )
         XCTAssertEqual(playthrough.lifecycleState, .stopped)
         XCTAssertEqual(operations.stopCount, 1)
@@ -47,9 +50,13 @@ final class AUHALTeardownTests: XCTestCase {
         let operations = TeardownOperationsSpy(disposeStatuses: [Self.injectedFailure, noErr])
         let playthrough = makePlaythrough(state: .started, operations: operations)
 
-        XCTAssertEqual(playthrough.stopAndDispose(), ["dispose AUHAL (-7001)"])
+        XCTAssertEqual(
+            playthrough.stopAndDispose(),
+            ["Direct: disposing AUHAL failed: OSStatus -7001 (non-printable)"]
+        )
         XCTAssertEqual(playthrough.lifecycleState, .uninitialized)
         XCTAssertEqual(operations.stopCount, 1)
+        XCTAssertEqual(operations.clearRenderCallbackCount, 1)
         XCTAssertEqual(operations.uninitializeCount, 1)
         XCTAssertEqual(operations.destroyContextCount, 0)
 
@@ -78,9 +85,22 @@ final class AUHALTeardownTests: XCTestCase {
 
         XCTAssertTrue(playthrough.stopAndDispose().isEmpty)
         XCTAssertEqual(operations.stopCount, 0)
+        XCTAssertEqual(operations.clearRenderCallbackCount, 1)
         XCTAssertEqual(operations.uninitializeCount, 0)
         XCTAssertEqual(operations.disposeCount, 1)
         XCTAssertEqual(operations.destroyContextCount, 1)
+    }
+
+    func testRenderContextIsDetachedBeforeAUHALIsUninitializedAndDisposed() {
+        let operations = TeardownOperationsSpy()
+        let playthrough = makePlaythrough(state: .started, operations: operations)
+
+        XCTAssertTrue(playthrough.stopAndDispose().isEmpty)
+        XCTAssertEqual(
+            operations.teardownEvents,
+            ["stop", "clear callback", "uninitialize", "dispose", "destroy context"]
+        )
+        XCTAssertTrue(playthrough.isFullyDisposed)
     }
 
     private func makePlaythrough(
@@ -102,9 +122,11 @@ private final class TeardownOperationsSpy {
     private var disposeStatuses: [OSStatus]
 
     private(set) var stopCount = 0
+    private(set) var clearRenderCallbackCount = 0
     private(set) var uninitializeCount = 0
     private(set) var disposeCount = 0
     private(set) var destroyContextCount = 0
+    private(set) var teardownEvents: [String] = []
 
     init(
         stopStatuses: [OSStatus] = [noErr],
@@ -122,20 +144,29 @@ private final class TeardownOperationsSpy {
             stop: { [weak self] _ in
                 guard let self else { return kAudio_ParamError }
                 stopCount += 1
+                teardownEvents.append("stop")
                 return nextStatus(from: &stopStatuses)
+            },
+            clearRenderCallback: { [weak self] _ in
+                self?.clearRenderCallbackCount += 1
+                self?.teardownEvents.append("clear callback")
+                return noErr
             },
             uninitialize: { [weak self] _ in
                 guard let self else { return kAudio_ParamError }
                 uninitializeCount += 1
+                teardownEvents.append("uninitialize")
                 return nextStatus(from: &uninitializeStatuses)
             },
             dispose: { [weak self] _ in
                 guard let self else { return kAudio_ParamError }
                 disposeCount += 1
+                teardownEvents.append("dispose")
                 return nextStatus(from: &disposeStatuses)
             },
             destroyRenderContext: { [weak self] _ in
                 self?.destroyContextCount += 1
+                self?.teardownEvents.append("destroy context")
             }
         )
     }

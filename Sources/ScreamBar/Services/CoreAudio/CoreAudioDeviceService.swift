@@ -286,6 +286,15 @@ final class CoreAudioDeviceService: ObservableObject {
         pendingCleanupSessionIDs.remove(sessionID)
     }
 
+    func confirmRouteResourcesReleased() throws {
+        try retryPendingRouteCleanups()
+        let cleanupFailures = backend.verifyRouteResourcesReleased()
+        guard cleanupFailures.isEmpty else {
+            cleanupFailures.forEach { report($0) }
+            throw AudioRoutingError.cleanupFailed(cleanupFailures)
+        }
+    }
+
     @discardableResult
     func shutdown() -> [String] {
         guard !isShuttingDown else { return [] }
