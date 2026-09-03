@@ -102,30 +102,38 @@ If JACK is already running, ScreamBar detects it and does not take ownership of 
 
 Select an input, an output, and a buffer policy, then start Direct Routing from the Status tab.
 
-The first output choice is **System Default**. An explicitly selected output is stored by CoreAudio device UID. If it disconnects, ScreamBar temporarily routes to the current system default and returns to the preferred output when it becomes available again. The saved preference is not overwritten by the fallback. Fallback only applies when the preferred output is unavailable; a present but incompatible device reports its routing error. An explicitly selected input does not silently fall back; the route waits for that input to return.
+For implementation details, latency accounting, runtime metrics, teardown rules, and the debugging/soak-test playbook, see [Direct Routing architecture](docs/direct-routing.md).
+
+The first output choice is **System Default**. An explicitly selected output is stored by CoreAudio device UID. If it disconnects, ScreamBar temporarily routes to the current system default and returns to the preferred output when it becomes available again. The saved preference is not overwritten by the fallback. Fallback only applies when the preferred output is unavailable. An explicitly selected input does not silently fall back; the route waits for that input to return.
 
 Available buffer choices are **Automatic**, 64, 128, 256, 512, 1024, and 2048 frames:
 
-- **Automatic** leaves the devices' buffer sizes unchanged.
+- **Automatic** leaves synchronized routes at the devices' current buffer sizes. When asynchronous sample-rate conversion is required, it starts with the smallest common supported tier from 64, 128, 256, and 512 frames. It can rebuild at the next tier after a runtime disruption.
 - An explicit value must be supported by both devices. ScreamBar applies and verifies it before starting, then restores the previous values when the route stops unless another client changed them in the meantime.
-- Smaller buffers can reduce the CoreAudio portion of latency but increase the risk of dropouts. Bluetooth transport latency remains independent of this setting; Automatic is recommended for Bluetooth devices.
+- Smaller buffers can reduce the CoreAudio portion of latency but increase the risk of dropouts. If an automatic tier is rejected during configuration, ScreamBar tries the next tier. Bluetooth transport latency remains independent of this setting; Automatic is recommended for Bluetooth devices.
 
 Bluetooth outputs follow the same generic CoreAudio negotiation path and are best-effort. No Bluetooth-specific workaround is applied.
 
-#### Sample-rate compatibility
+#### Automatic sample-rate negotiation and conversion
 
-Direct Routing V1 does not perform software sample-rate conversion. The input and output hardware must support a common nominal sample rate. ScreamBar chooses one deterministically in this order:
+There is no manual sample-rate setting for Direct Routing. When the input and output support a common hardware nominal rate, ScreamBar chooses it deterministically in this order:
 
 1. the output device's active nominal rate, if supported by the input;
 2. 48 kHz;
 3. 44.1 kHz;
 4. another common rate in deterministic order.
 
-If the devices do not share a nominal rate, the route stops with `The selected devices do not share a nominal sample rate`. Choose another input or output, or configure the devices externally to expose a common rate. Drift compensation keeps clocks synchronized; it is not sample-rate conversion.
+When no common nominal rate exists, ScreamBar keeps both devices at valid native rates and automatically converts between them. For example, a 48 kHz S/PDIF receiver can route to a 44.1 kHz Bluetooth output without changing either device to an unsupported rate. The running status displays both rates when conversion is active.
+
+The output device remains the timing master. Conversion uses Apple's Varispeed audio unit at high quality, a preallocated lock-free single-producer/single-consumer buffer, and adaptive clock correction. The audio render callbacks allocate no memory, acquire no locks, and emit no logs. The adaptive correction is required because two physical devices have independent clocks; fixed-ratio sample-rate conversion alone would eventually underrun or overflow.
+
+The converter targets no more than 5 ms of app-added latency. Its FIFO may grow only as needed within a 10 ms low-latency ceiling to absorb callback phase, clock drift, and scheduling jitter. If a device combination cannot operate reliably inside that ceiling, ScreamBar uses the existing last-resort fallback and displays its calculated latency instead of a fixed estimate. This value excludes latency inside the physical input, output, codec, or Bluetooth transport.
+
+Automatic mode also monitors callback-size violations, callback deadline misses, underruns, overflows, and FIFO resynchronization. A disrupted converted route is rebuilt at the next buffer tier actually supported by both devices. If no safer shared tier exists, the route stops with a contextual error instead of retrying unsupported sizes. Route logs include the configured buffer policy and effective tier, and distinguish an unstable explicit setting from an exhausted Automatic ladder.
 
 #### CoreAudio behavior
 
-For a full-duplex physical device, Direct Routing uses one AUHAL bound directly to that device. For different input and output devices, it creates a process-private Aggregate Device, keeps the output as its master clock, and enables drift compensation only for the input subdevice. If either device cannot participate in that private Aggregate Device, V1 fails cleanly; it does not fall back to a two-AUHAL architecture.
+For a full-duplex physical device, Direct Routing uses one AUHAL bound directly to that device. For different devices that share a nominal rate, it creates a process-private Aggregate Device, keeps the output as its master clock, and enables drift compensation only for the input subdevice. If the devices have no common nominal rate, Direct Routing instead uses one input AUHAL and one output AUHAL with the automatic asynchronous converter between them; no Aggregate Device is created for that route.
 
 The route remains in shared mode:
 
@@ -133,9 +141,9 @@ The route remains in shared mode:
 - it does not change the macOS system default output;
 - other clients such as music and voice-chat applications can continue to use the physical output.
 
-The playthrough uses one AUHAL in one clock domain, with input IO on element 1 and output IO on element 0. It prefers the native AUHAL software-playthrough connection with a deterministic Float32 client PCM format. CoreAudio may convert normal PCM representation or interleaving, but the client format uses the negotiated hardware rate and never hides a nominal-rate mismatch. If channel mapping requires it, a render callback pulls AUHAL input through preallocated buffers. Direct Routing V1 does not use an application-level ring buffer.
+The synchronized playthrough uses one AUHAL in one clock domain, with input IO on element 1 and output IO on element 0. It prefers the native AUHAL software-playthrough connection with a deterministic Float32 client PCM format. CoreAudio may convert normal PCM representation or interleaving, but the client format uses the negotiated hardware rate. The asynchronous path uses separate deterministic Float32 formats at the input and output native rates, with conversion performed explicitly between them.
 
-Device, default-device, alive/hot-plug, nominal-rate, and buffer changes are monitored. A change affecting the active route performs a complete stop, AUHAL disposal, Aggregate Device destruction, resolution, renegotiation, rebuild, and restart. A running Aggregate Device is never mutated in place.
+Device, default-device, alive/hot-plug, nominal-rate, and buffer changes are monitored, and every change still refreshes the published CoreAudio inventory and hardware revision. Direct Routing rebuilds only when the effective input/output or one of their relevant capabilities changes. Adding or removing an unrelated device, such as an unused HDMI display, does not interrupt the active route. A system-default output change is also ignored while an available explicit output remains effective; it does rebuild a `System Default` route or an explicit-output fallback. Losing an explicit output, following a changed fallback, restoring the preferred output, or changing an active endpoint's rate, channel, alive, or buffer properties performs a complete stop, AUHAL disposal, Aggregate Device destruction, resolution, renegotiation, rebuild, and restart. A running Aggregate Device is never mutated in place.
 
 ## Status and logs
 
@@ -160,7 +168,35 @@ SCREAMBAR_RUN_COREAUDIO_INTEGRATION_TESTS=1 \
   swift test --filter CoreAudioCoexistenceIntegrationTests
 ```
 
-The regular suite covers IO topology and stream-format contracts. The hardware integration suite covers single-AUHAL creation, explicit buffer application and restoration, preservation of the default output and Hog Mode state, and concurrent use by a normal macOS audio client. A hardware-dependent test is skipped when the machine does not expose a suitable device or buffer configuration.
+The automatic converter has a separate hardware test. By default it looks for `Cubilux SPDIF Receiver` and `Bose QC 45`; override either name for another incompatible pair:
+
+```bash
+SCREAMBAR_RUN_COREAUDIO_INTEGRATION_TESTS=1 \
+SCREAMBAR_ASYNC_SRC_INPUT_NAME="Cubilux SPDIF Receiver" \
+SCREAMBAR_ASYNC_SRC_OUTPUT_NAME="Bose QC 45" \
+SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=60 \
+  swift test --filter CoreAudioAsyncSRCIntegrationTests
+```
+
+The simulated converter soaks are opt-in and can be run independently. The value is a wall-clock duration in seconds:
+
+```bash
+SCREAMBAR_ASYNC_SRC_TIMING_SOAK_SECONDS=300 \
+  swift test --filter testAdaptiveCallbackMatrixDuringRequestedSoak
+
+SCREAMBAR_ASYNC_SRC_QUALITY_SOAK_SECONDS=300 \
+  swift test --filter testAdaptiveRoutingQualityDuringRequestedSoak
+
+SCREAMBAR_ASYNC_SRC_FALLBACK_QUALITY_SOAK_SECONDS=300 \
+  swift test --filter testFallbackRoutingQualityDuringRequestedSoak
+
+SCREAMBAR_ASYNC_SRC_PERFORMANCE_SOAK_SECONDS=300 \
+  swift test --filter testConversionMatrixKeepsRealtimePerformanceHeadroomDuringRequestedSoak
+```
+
+Use `60`, `300`, `900`, `1800`, or `3600` seconds for the standard 1, 5, 15, 30, or 60 minute stages. Run the shorter stages first; the long hardware soak is intended only after the regular suite and simulated stages pass.
+
+The regular suite covers rate planning, independent-clock drift up to ±1000 ppm, jitter and burst simulation, lock-free buffer behavior, pitch/gain/SNR, IO topology, callback deadlines, and stream-format contracts. The hardware suites cover both playthrough paths, the complete Direct Routing service lifecycle, cleanup, explicit buffer application and restoration, preservation of the default output and Hog Mode state, and concurrent use by a normal macOS audio client. A hardware-dependent test is skipped when the requested devices or capabilities are unavailable.
 
 ## Troubleshooting
 
@@ -168,9 +204,9 @@ The regular suite covers IO topology and stream-format contracts. The hardware i
 
 Enable ScreamBar under **System Settings → Privacy & Security → Microphone**, then start Direct Routing again. Use the `.app` bundle rather than `swift run` when validating permission behavior.
 
-### The devices do not share a nominal sample rate
+### Sample-rate conversion is active
 
-The selected pair has no hardware rate in common. Direct Routing V1 fails cleanly instead of resampling. Select another input or output. A wired or USB input often exposes more compatible rates than the microphone profile of a Bluetooth headset.
+This is expected when the input and output have no hardware nominal rate in common. ScreamBar displays the input and output rates and converts automatically. Conversion itself is sub-millisecond on supported Apple hardware, but at least one device buffer is required to bridge independent clocks. ScreamBar targets 5 ms of app-added latency, permits an adaptive stability margin up to 10 ms, and reports a calculated fallback value when that ceiling cannot be maintained. Bluetooth codec/transport latency is independent and usually much larger.
 
 ### A buffer size is unsupported or cannot be configured
 

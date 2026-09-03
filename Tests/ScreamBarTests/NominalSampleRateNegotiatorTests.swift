@@ -31,6 +31,51 @@ final class NominalSampleRateNegotiatorTests: XCTestCase {
         XCTAssertEqual(secondaryRate, 44_100)
     }
 
+    func testPlanUsesSynchronizedOutputRateWhenCommon() throws {
+        let plan = try NominalSampleRateNegotiator.makePlan(
+            inputRanges: [range(44_100), range(48_000)],
+            inputCurrentRate: 48_000,
+            outputRanges: [range(44_100), range(48_000)],
+            outputCurrentRate: 44_100,
+            inputUID: inputUID,
+            outputUID: outputUID
+        )
+
+        XCTAssertEqual(plan, .synchronized(sampleRate: 44_100))
+    }
+
+    func testPlanUsesIndependentNativeRatesWhenNoCommonRateExists() throws {
+        let plan = try NominalSampleRateNegotiator.makePlan(
+            inputRanges: [range(48_000)],
+            inputCurrentRate: 48_000,
+            outputRanges: [range(16_000), range(44_100)],
+            outputCurrentRate: 44_100,
+            inputUID: inputUID,
+            outputUID: outputUID
+        )
+
+        XCTAssertEqual(
+            plan,
+            .converted(inputSampleRate: 48_000, outputSampleRate: 44_100)
+        )
+    }
+
+    func testConversionPlanUsesDeterministicKnownRatesWhenCurrentRatesAreInvalid() throws {
+        let plan = try NominalSampleRateNegotiator.makePlan(
+            inputRanges: [range(44_100), range(48_000)],
+            inputCurrentRate: 96_000,
+            outputRanges: [range(32_000)],
+            outputCurrentRate: 96_000,
+            inputUID: inputUID,
+            outputUID: outputUID
+        )
+
+        XCTAssertEqual(
+            plan,
+            .converted(inputSampleRate: 48_000, outputSampleRate: 32_000)
+        )
+    }
+
     func testChoosesDeterministicNearestCommonRate() throws {
         let selectedRate = try negotiate(
             inputRanges: [range(32_000), range(64_000)],

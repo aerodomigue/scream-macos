@@ -22,7 +22,7 @@ final class CoreAudioDeviceService: ObservableObject {
     private struct PreparationSignature {
         let inputUID: AudioDeviceUID
         let outputUID: AudioDeviceUID
-        let nominalSampleRate: Double
+        let sampleRatePlan: AudioSampleRatePlan
         let inputRanges: [NominalSampleRateRange]
         let outputRanges: [NominalSampleRateRange]
     }
@@ -70,6 +70,10 @@ final class CoreAudioDeviceService: ObservableObject {
 
         do {
             try self.backend.startMonitoring()
+        } catch {
+            report("Failed to initialize CoreAudio device monitoring: \(error.localizedDescription)")
+        }
+        do {
             try refreshSnapshot(notifyRoute: false)
         } catch {
             report("Failed to initialize CoreAudio inventory: \(error.localizedDescription)")
@@ -106,24 +110,36 @@ final class CoreAudioDeviceService: ObservableObject {
         )
         let inputDevice = resolution.input
         let outputDevice = resolution.output
-        let nominalSampleRate = try NominalSampleRateNegotiator.negotiate(
+        let sampleRatePlan = try NominalSampleRateNegotiator.makePlan(
             inputRanges: inputDevice.supportedNominalSampleRates,
+            inputCurrentRate: inputDevice.currentNominalSampleRate,
             outputRanges: outputDevice.supportedNominalSampleRates,
             outputCurrentRate: outputDevice.currentNominalSampleRate,
             inputUID: inputDevice.id,
             outputUID: outputDevice.id
         )
-        if let requestedBufferFrameSize {
-            try BufferFrameSizeValidator.validate(
-                requestedFrameCount: requestedBufferFrameSize,
-                input: inputDevice,
-                output: outputDevice
-            )
+        let effectiveBufferFrameSize: UInt32?
+        if sampleRatePlan.usesSampleRateConversion {
+            effectiveBufferFrameSize = try AsyncSRCLowLatencyPolicy
+                .resolveBufferFrameSize(
+                    requestedFrameCount: requestedBufferFrameSize,
+                    input: inputDevice,
+                    output: outputDevice
+                )
+        } else {
+            if let requestedBufferFrameSize {
+                try BufferFrameSizeValidator.validate(
+                    requestedFrameCount: requestedBufferFrameSize,
+                    input: inputDevice,
+                    output: outputDevice
+                )
+            }
+            effectiveBufferFrameSize = requestedBufferFrameSize
         }
         let expectedSignature = PreparationSignature(
             inputUID: inputDevice.id,
             outputUID: outputDevice.id,
-            nominalSampleRate: nominalSampleRate,
+            sampleRatePlan: sampleRatePlan,
             inputRanges: inputDevice.supportedNominalSampleRates,
             outputRanges: outputDevice.supportedNominalSampleRates
         )
@@ -137,7 +153,7 @@ final class CoreAudioDeviceService: ObservableObject {
         }
 
         try await configureAndVerifySampleRate(
-            nominalSampleRate,
+            sampleRatePlan.outputSampleRate,
             for: outputDevice.id,
             operation: "output",
             validateOwnership: validateOwnership
@@ -145,7 +161,7 @@ final class CoreAudioDeviceService: ObservableObject {
         try validateOwnership()
         if inputDevice.id != outputDevice.id {
             try await configureAndVerifySampleRate(
-                nominalSampleRate,
+                sampleRatePlan.inputSampleRate,
                 for: inputDevice.id,
                 operation: "input",
                 validateOwnership: validateOwnership
@@ -166,8 +182,8 @@ final class CoreAudioDeviceService: ObservableObject {
             sessionID = try backend.prepareRoute(
                 input: inputDevice,
                 output: outputDevice,
-                nominalSampleRate: nominalSampleRate,
-                requestedBufferFrameSize: requestedBufferFrameSize,
+                sampleRatePlan: sampleRatePlan,
+                requestedBufferFrameSize: effectiveBufferFrameSize,
                 validateOwnership: validateOwnership
             )
         } catch is CancellationError {
@@ -177,7 +193,7 @@ final class CoreAudioDeviceService: ObservableObject {
                 failure,
                 input: inputDevice,
                 output: outputDevice,
-                nominalSampleRate: nominalSampleRate
+                sampleRatePlan: sampleRatePlan
             )
         } catch let failure as AUHALSetupFailure {
             throw AudioRoutingError.auHALConfigurationFailed(
@@ -185,7 +201,7 @@ final class CoreAudioDeviceService: ObservableObject {
                 context: makeAUHALContext(
                     input: inputDevice,
                     output: outputDevice,
-                    nominalSampleRate: nominalSampleRate
+                    nominalSampleRate: sampleRatePlan.outputSampleRate
                 )
             )
         } catch {
@@ -194,14 +210,13 @@ final class CoreAudioDeviceService: ObservableObject {
                 makeAggregateContext(
                     input: inputDevice,
                     output: outputDevice,
-                    nominalSampleRate: nominalSampleRate
+                    nominalSampleRate: sampleRatePlan.outputSampleRate
                 )
             )
         }
 
         do {
             try validateOwnership()
-            try backend.rebuildListeners()
             try refreshSnapshot(notifyRoute: false)
             try validateOwnership()
             try validateFinalRoute(
@@ -230,18 +245,31 @@ final class CoreAudioDeviceService: ObservableObject {
                 makeAUHALContext(
                     input: inputDevice,
                     output: outputDevice,
-                    nominalSampleRate: nominalSampleRate
+                    nominalSampleRate: sampleRatePlan.outputSampleRate
                 )
             )
         }
 
+        do {
+            try backend.rebuildListeners()
+        } catch {
+            reportListenerReconciliationFailure(error)
+        }
+
+        let routeLatency = backend.routeLatency(sessionID: sessionID)
         return PreparedAudioRoute(
             sessionID: sessionID,
             route: EffectiveAudioRoute(
                 input: inputDevice,
                 output: outputDevice,
-                nominalSampleRate: nominalSampleRate,
-                isUsingOutputFallback: resolution.isUsingOutputFallback
+                sampleRatePlan: sampleRatePlan,
+                isUsingOutputFallback: resolution.isUsingOutputFallback,
+                bufferFrameSize: effectiveBufferFrameSize,
+                estimatedApplicationLatencySeconds:
+                    routeLatency?.estimatedApplicationSeconds,
+                maximumApplicationLatencySeconds:
+                    routeLatency?.maximumApplicationSeconds,
+                isLowLatency: routeLatency?.isLowLatency ?? true
             )
         )
     }
@@ -274,6 +302,10 @@ final class CoreAudioDeviceService: ObservableObject {
                 )
             )
         }
+    }
+
+    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency? {
+        backend.routeLatency(sessionID: sessionID)
     }
 
     func stopAndDestroyRoute(sessionID: UUID) throws {
@@ -473,12 +505,26 @@ final class CoreAudioDeviceService: ObservableObject {
                 return
             }
             do {
-                try self.backend.rebuildListeners()
                 try self.refreshSnapshot(notifyRoute: true)
             } catch {
                 self.report("Failed to refresh CoreAudio inventory: \(error.localizedDescription)")
+                return
+            }
+            do {
+                try self.backend.rebuildListeners()
+            } catch {
+                self.reportListenerReconciliationFailure(error)
             }
         }
+    }
+
+    private func reportListenerReconciliationFailure(_ error: Error) {
+        coreAudioServiceLogger.debug(
+            "CoreAudio device monitoring reconciliation failed: \(error.localizedDescription, privacy: .public)"
+        )
+        report(
+            "CoreAudio device monitoring is temporarily degraded; the current hardware inventory remains available."
+        )
     }
 
     private func validateFinalRoute(
@@ -489,7 +535,7 @@ final class CoreAudioDeviceService: ObservableObject {
         let context = AUHALContext(
             inputUID: expectedSignature.inputUID,
             outputUID: expectedSignature.outputUID,
-            nominalSampleRate: expectedSignature.nominalSampleRate
+            nominalSampleRate: expectedSignature.sampleRatePlan.outputSampleRate
         )
         let resolution: (
             input: AudioDeviceDescriptor,
@@ -520,11 +566,11 @@ final class CoreAudioDeviceService: ObservableObject {
               resolution.output.id == expectedSignature.outputUID,
               NominalSampleRateNegotiator.ratesMatch(
                   resolution.input.currentNominalSampleRate,
-                  expectedSignature.nominalSampleRate
+                  expectedSignature.sampleRatePlan.inputSampleRate
               ),
               NominalSampleRateNegotiator.ratesMatch(
                   resolution.output.currentNominalSampleRate,
-                  expectedSignature.nominalSampleRate
+                  expectedSignature.sampleRatePlan.outputSampleRate
               ),
               inputRanges == expectedInputRanges,
               outputRanges == expectedOutputRanges else {
@@ -660,7 +706,7 @@ final class CoreAudioDeviceService: ObservableObject {
         _ failure: LegacyRouteFailure,
         input: AudioDeviceDescriptor,
         output: AudioDeviceDescriptor,
-        nominalSampleRate: Double
+        sampleRatePlan: AudioSampleRatePlan
     ) -> AudioRoutingError {
         switch failure {
         case .bufferFrameSizeConfiguration(let context):
@@ -674,7 +720,7 @@ final class CoreAudioDeviceService: ObservableObject {
                 makeAggregateContext(
                     input: input,
                     output: output,
-                    nominalSampleRate: nominalSampleRate
+                    nominalSampleRate: sampleRatePlan.outputSampleRate
                 )
             )
         case .aggregateCreation(let status):
@@ -683,7 +729,7 @@ final class CoreAudioDeviceService: ObservableObject {
                 makeAggregateContext(
                     input: input,
                     output: output,
-                    nominalSampleRate: nominalSampleRate
+                    nominalSampleRate: sampleRatePlan.outputSampleRate
                 )
             )
         case .aggregateVerification(let message):
@@ -692,7 +738,7 @@ final class CoreAudioDeviceService: ObservableObject {
                 makeAggregateContext(
                     input: input,
                     output: output,
-                    nominalSampleRate: nominalSampleRate
+                    nominalSampleRate: sampleRatePlan.outputSampleRate
                 )
             )
         case .auHALCreation(let status):
@@ -701,7 +747,7 @@ final class CoreAudioDeviceService: ObservableObject {
                 makeAUHALContext(
                     input: input,
                     output: output,
-                    nominalSampleRate: nominalSampleRate
+                    nominalSampleRate: sampleRatePlan.outputSampleRate
                 )
             )
         case .auHAL(let failure):
@@ -711,7 +757,7 @@ final class CoreAudioDeviceService: ObservableObject {
                 context: makeAUHALContext(
                     input: input,
                     output: output,
-                    nominalSampleRate: nominalSampleRate
+                    nominalSampleRate: sampleRatePlan.outputSampleRate
                 )
             )
         case .cleanup(let failures):

@@ -33,7 +33,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ScreamBarTests",
-            dependencies: ["ScreamBar"],
+            dependencies: ["ScreamBar", "ScreamBarCoreAudioRT"],
             path: "Tests/ScreamBarTests",
             linkerSettings: [
                 .linkedFramework("AudioToolbox"),

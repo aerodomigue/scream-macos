@@ -73,6 +73,7 @@ struct StatusSectionView: View {
                     Text(directRoutingDescription)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer()
@@ -96,7 +97,24 @@ struct StatusSectionView: View {
         switch viewModel.directRoutingService.state {
         case .running(let route):
             let fallbackSuffix = route.isUsingOutputFallback ? " (fallback)" : ""
-            return "\(route.input.name) → \(route.output.name), \(Int(route.nominalSampleRate)) Hz\(fallbackSuffix)"
+            let rateDescription = route.usesSampleRateConversion
+                ? "\(Int(route.inputNominalSampleRate)) → \(Int(route.outputNominalSampleRate)) Hz · converted"
+                : "\(Int(route.nominalSampleRate)) Hz"
+            let bufferDescription = DirectRoutingBufferDescription.make(
+                configuredSize: viewModel.directRoutingConfiguration.bufferSize,
+                effectiveFrameCount: route.bufferFrameSize
+            )
+            let latencySuffix: String
+            if route.usesSampleRateConversion,
+               let latencySeconds = route.estimatedApplicationLatencySeconds {
+                latencySuffix = String(
+                    format: " · app ≈ %.1f ms",
+                    latencySeconds * 1_000
+                )
+            } else {
+                latencySuffix = ""
+            }
+            return "\(route.input.name) → \(route.output.name)\(fallbackSuffix)\n\(rateDescription)\n\(bufferDescription)\(latencySuffix)"
         case .waitingForInput:
             return "Waiting for input"
         case .waitingForOutput:

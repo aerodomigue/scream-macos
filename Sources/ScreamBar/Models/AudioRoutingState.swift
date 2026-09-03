@@ -3,8 +3,50 @@ import Foundation
 struct EffectiveAudioRoute: Equatable, Sendable {
     let input: AudioDeviceDescriptor
     let output: AudioDeviceDescriptor
-    let nominalSampleRate: Double
+    let sampleRatePlan: AudioSampleRatePlan
     let isUsingOutputFallback: Bool
+    let bufferFrameSize: UInt32?
+    let estimatedApplicationLatencySeconds: Double?
+    let maximumApplicationLatencySeconds: Double?
+    let isLowLatency: Bool
+
+    init(
+        input: AudioDeviceDescriptor,
+        output: AudioDeviceDescriptor,
+        sampleRatePlan: AudioSampleRatePlan,
+        isUsingOutputFallback: Bool,
+        bufferFrameSize: UInt32? = nil,
+        estimatedApplicationLatencySeconds: Double? = nil,
+        maximumApplicationLatencySeconds: Double? = nil,
+        isLowLatency: Bool = true
+    ) {
+        self.input = input
+        self.output = output
+        self.sampleRatePlan = sampleRatePlan
+        self.isUsingOutputFallback = isUsingOutputFallback
+        self.bufferFrameSize = bufferFrameSize
+        self.estimatedApplicationLatencySeconds =
+            estimatedApplicationLatencySeconds
+        self.maximumApplicationLatencySeconds =
+            maximumApplicationLatencySeconds
+        self.isLowLatency = isLowLatency
+    }
+
+    var nominalSampleRate: Double {
+        sampleRatePlan.outputSampleRate
+    }
+
+    var inputNominalSampleRate: Double {
+        sampleRatePlan.inputSampleRate
+    }
+
+    var outputNominalSampleRate: Double {
+        sampleRatePlan.outputSampleRate
+    }
+
+    var usesSampleRateConversion: Bool {
+        sampleRatePlan.usesSampleRateConversion
+    }
 }
 
 struct PreparedAudioRoute: Equatable, Sendable {

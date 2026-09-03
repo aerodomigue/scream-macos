@@ -41,6 +41,13 @@ struct AUHALContext: Equatable, Sendable {
     let nominalSampleRate: Double
 }
 
+struct RoutingLatencyStabilityContext: Equatable, Sendable {
+    let inputUID: AudioDeviceUID
+    let outputUID: AudioDeviceUID
+    let bufferFrameCount: UInt32?
+    let estimatedApplicationLatencySeconds: Double
+}
+
 enum AUHALConfigurationStage: String, Equatable, Sendable {
     case deviceBinding
     case inputIO
@@ -48,6 +55,8 @@ enum AUHALConfigurationStage: String, Equatable, Sendable {
     case clientStreamFormat
     case channelMapping
     case playthroughConnection
+    case ringBuffer
+    case sampleRateConverter
 }
 
 enum AudioRoutingError: LocalizedError, Equatable, Sendable {
@@ -64,6 +73,7 @@ enum AudioRoutingError: LocalizedError, Equatable, Sendable {
     case auHALConfigurationFailed(stage: AUHALConfigurationStage, context: AUHALContext)
     case auHALStartFailed(AUHALContext)
     case finalRouteValidationFailed(AUHALContext)
+    case latencyStabilityLimitExceeded(RoutingLatencyStabilityContext)
     case serviceShuttingDown
     case cleanupFailed([String])
     case unexpected(String)
@@ -96,6 +106,13 @@ enum AudioRoutingError: LocalizedError, Equatable, Sendable {
             return "Failed to start AUHAL"
         case .finalRouteValidationFailed:
             return "The audio route changed while it was being prepared"
+        case .latencyStabilityLimitExceeded(let context):
+            let latencyMilliseconds =
+                context.estimatedApplicationLatencySeconds * 1_000
+            return String(
+                format: "Direct Routing could not remain stable at the configured latency (approximately %.1f ms)",
+                latencyMilliseconds
+            )
         case .serviceShuttingDown:
             return "Direct Routing is shutting down"
         case .cleanupFailed(let stages):

@@ -23,9 +23,24 @@ private struct RetainedAggregateConstructionFailure: Error {
     let cleanupStatus: OSStatus
 }
 
-private struct ListenerCleanupRetryRequired: LocalizedError {
+struct BufferFrameSizeRestore: Equatable {
+    let deviceUID: AudioDeviceUID
+    let frameCount: UInt32
+    let appliedFrameCount: UInt32
+}
+
+struct BufferFrameSizeRestoreResult: Equatable {
+    let retryableRestores: [BufferFrameSizeRestore]
+    let failures: [String]
+}
+
+private struct BufferFrameSizeRestoreReadbackFailure: LocalizedError {
+    let deviceUID: AudioDeviceUID
+    let expectedFrameCount: UInt32
+    let observedFrameCount: UInt32
+
     var errorDescription: String? {
-        "CoreAudio device monitoring cleanup is pending and will be retried"
+        "Expected \(deviceUID.rawValue) to restore \(expectedFrameCount) frames, observed \(observedFrameCount)"
     }
 }
 
@@ -110,28 +125,30 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
 
     private final class RouteResources {
         var aggregateDeviceID: AudioDeviceID?
-        var playthrough: AUHALPlaythrough?
+        var playthrough: (any CoreAudioRouteTransport)?
         var bufferFrameSizeRestores: [BufferFrameSizeRestore]
+        var expectedInputCallbackFrames: UInt32?
+        var expectedOutputCallbackFrames: UInt32?
 
         init(
             aggregateDeviceID: AudioDeviceID? = nil,
-            playthrough: AUHALPlaythrough? = nil,
-            bufferFrameSizeRestores: [BufferFrameSizeRestore] = []
+            playthrough: (any CoreAudioRouteTransport)? = nil,
+            bufferFrameSizeRestores: [BufferFrameSizeRestore] = [],
+            expectedInputCallbackFrames: UInt32? = nil,
+            expectedOutputCallbackFrames: UInt32? = nil
         ) {
             self.aggregateDeviceID = aggregateDeviceID
             self.playthrough = playthrough
             self.bufferFrameSizeRestores = bufferFrameSizeRestores
+            self.expectedInputCallbackFrames = expectedInputCallbackFrames
+            self.expectedOutputCallbackFrames = expectedOutputCallbackFrames
         }
 
         var hasLiveCoreAudioResources: Bool {
-            playthrough != nil || aggregateDeviceID != nil
+            playthrough != nil
+                || aggregateDeviceID != nil
+                || !bufferFrameSizeRestores.isEmpty
         }
-    }
-
-    private struct BufferFrameSizeRestore {
-        let deviceUID: AudioDeviceUID
-        let frameCount: UInt32
-        let appliedFrameCount: UInt32
     }
 
     private static let aggregateName = "ScreamBar Direct Routing"
@@ -139,6 +156,8 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
     private static let defaultDeviceResolutionAttempts = 3
     private static let listenerCleanupRetryMessage =
         "CoreAudio device monitoring cleanup is pending and will be retried"
+    private static let listenerCleanupRetryLimit = 3
+    private static let listenerCleanupRetryBaseNanoseconds: UInt64 = 250_000_000
 
     private let listenerQueue = DispatchQueue(
         label: "com.screambar.coreaudio-listeners",
@@ -146,7 +165,9 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
     )
     private let listenerOperations: CoreAudioListenerOperations
     private let allDeviceIDsProvider: () throws -> [AudioDeviceID]
+    private let listenerCleanupRetrySleep: (UInt64) async throws -> Void
     private var listeners: [ListenerRegistration] = []
+    private var listenerCleanupRetryTask: Task<Void, Never>?
     private var routes: [UUID: RouteResources] = [:]
     private var pendingCleanupRoutes: [UUID: RouteResources] = [:]
 
@@ -161,10 +182,14 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
                     mElement: kAudioObjectPropertyElementMain
                 )
             )
+        },
+        listenerCleanupRetrySleep: @escaping (UInt64) async throws -> Void = {
+            try await Task.sleep(nanoseconds: $0)
         }
     ) {
         self.listenerOperations = listenerOperations
         self.allDeviceIDsProvider = allDeviceIDsProvider
+        self.listenerCleanupRetrySleep = listenerCleanupRetrySleep
     }
 
     func startMonitoring() throws {
@@ -204,13 +229,34 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
     }
 
     func rebuildListeners() throws {
+        listenerCleanupRetryTask?.cancel()
+        listenerCleanupRetryTask = nil
+        do {
+            if try reconcileListeners() {
+                scheduleListenerCleanupRetry(attempt: 1)
+            }
+        } catch {
+            legacyCoreAudioLogger.debug(
+                "CoreAudio listener reconciliation was incomplete and will be retried: \(error.localizedDescription, privacy: .public)"
+            )
+            scheduleListenerCleanupRetry(attempt: 1)
+            throw error
+        }
+    }
+
+    private func reconcileListeners() throws -> Bool {
         let removalFailures = stopMonitoring()
-        guard removalFailures.isEmpty else {
-            throw ListenerCleanupRetryRequired()
+        if !removalFailures.isEmpty {
+            legacyCoreAudioLogger.debug(
+                "CoreAudio listener reconciliation retained \(removalFailures.count) live registration(s) for a later debounced retry."
+            )
         }
 
         for address in Self.monitoredSystemPropertyAddresses {
-            try addListener(objectID: AudioObjectID(kAudioObjectSystemObject), address: address)
+            try addListenerIfNeeded(
+                objectID: AudioObjectID(kAudioObjectSystemObject),
+                address: address
+            )
         }
 
         for deviceID in try allDeviceIDs() {
@@ -230,10 +276,21 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
                     objectID: deviceID,
                     address: address
                 ) {
-                    try addListener(objectID: deviceID, address: address)
+                    do {
+                        try addListenerIfNeeded(objectID: deviceID, address: address)
+                    } catch {
+                        if listenerOperations.isDevicePresent(deviceID) == false {
+                            legacyCoreAudioLogger.debug(
+                                "Skipped \(CoreAudioPropertyReader.selectorDescription(address.mSelector), privacy: .public) listener because the CoreAudio device disappeared during reconciliation."
+                            )
+                            continue
+                        }
+                        throw error
+                    }
                 }
             }
         }
+        return !removalFailures.isEmpty
     }
 
     static var monitoredSystemPropertyAddresses: [AudioObjectPropertyAddress] {
@@ -355,7 +412,7 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
     func prepareRoute(
         input: AudioDeviceDescriptor,
         output: AudioDeviceDescriptor,
-        nominalSampleRate: Double,
+        sampleRatePlan: AudioSampleRatePlan,
         requestedBufferFrameSize: UInt32?,
         validateOwnership: () throws -> Void
     ) throws -> UUID {
@@ -391,52 +448,48 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
                 }
             }
 
-            let routeDeviceID: AudioDeviceID
-            let inputChannelOffset: Int
-            if input.id == output.id {
-                routeDeviceID = inputDeviceID
-                inputChannelOffset = 0
-            } else {
-                try validateOwnership()
-                let createdAggregateID: AudioDeviceID
-                do {
-                    createdAggregateID = try createAggregateDevice(
-                        input: input,
-                        output: output,
-                        nominalSampleRate: nominalSampleRate,
-                        requestedBufferFrameSize: requestedBufferFrameSize
-                    )
-                } catch let failure as RetainedAggregateConstructionFailure {
-                    resources.aggregateDeviceID = failure.aggregateDeviceID
-                    legacyCoreAudioLogger.error(
-                        "Initial aggregate cleanup failed: \(failure.cleanupStatus)"
-                    )
-                    throw failure.primaryError
-                }
-                resources.aggregateDeviceID = createdAggregateID
-                routeDeviceID = createdAggregateID
-                inputChannelOffset = output.inputChannelCount
-            }
-
-            do {
-                try validateOwnership()
-                resources.playthrough = try AUHALPlaythrough.make(
-                    deviceID: routeDeviceID,
-                    inputChannelCount: input.inputChannelCount,
-                    inputChannelOffset: inputChannelOffset,
-                    outputChannelCount: output.outputChannelCount,
-                    nominalSampleRate: nominalSampleRate
+            switch sampleRatePlan {
+            case let .synchronized(nominalSampleRate):
+                try prepareSynchronizedPlaythrough(
+                    input: input,
+                    output: output,
+                    inputDeviceID: inputDeviceID,
+                    outputDeviceID: outputDeviceID,
+                    nominalSampleRate: nominalSampleRate,
+                    requestedBufferFrameSize: requestedBufferFrameSize,
+                    resources: resources,
+                    validateOwnership: validateOwnership
                 )
-            } catch let failure as AUHALRetainedConstructionFailure {
-                resources.playthrough = failure.playthrough
-                failure.cleanupFailures.forEach {
-                    legacyCoreAudioLogger.error("\($0, privacy: .public)")
+            case let .converted(inputSampleRate, outputSampleRate):
+                try validateOwnership()
+                resources.expectedInputCallbackFrames = requestedBufferFrameSize
+                    ?? input.currentBufferFrameSize
+                resources.expectedOutputCallbackFrames = requestedBufferFrameSize
+                    ?? output.currentBufferFrameSize
+                do {
+                    resources.playthrough = try AsyncSRCPlaythrough.make(
+                        inputDeviceID: inputDeviceID,
+                        outputDeviceID: outputDeviceID,
+                        inputChannelCount: input.inputChannelCount,
+                        outputChannelCount: output.outputChannelCount,
+                        inputSampleRate: inputSampleRate,
+                        outputSampleRate: outputSampleRate,
+                        inputBufferFrames: requestedBufferFrameSize
+                            ?? input.currentBufferFrameSize,
+                        outputBufferFrames: requestedBufferFrameSize
+                            ?? output.currentBufferFrameSize
+                    )
+                } catch let failure as AsyncSRCPlaythroughRetainedConstructionFailure {
+                    resources.playthrough = failure.playthrough
+                    failure.cleanupFailures.forEach {
+                        legacyCoreAudioLogger.error("\($0, privacy: .public)")
+                    }
+                    throw translatedConstructionError(failure.primaryError)
+                } catch let failure as AUHALCreationFailure {
+                    throw LegacyRouteFailure.auHALCreation(failure.status)
+                } catch let failure as AUHALSetupFailure {
+                    throw LegacyRouteFailure.auHAL(failure)
                 }
-                throw translatedConstructionError(failure.primaryError)
-            } catch let failure as AUHALCreationFailure {
-                throw LegacyRouteFailure.auHALCreation(failure.status)
-            } catch let failure as AUHALSetupFailure {
-                throw LegacyRouteFailure.auHAL(failure)
             }
 
             let sessionID = UUID()
@@ -481,7 +534,130 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         return failures
     }
 
+    func asyncSRCMetrics(sessionID: UUID) -> AsyncSRCMetrics? {
+        (routes[sessionID]?.playthrough as? AsyncSRCPlaythrough)?.metrics
+    }
+
+    func asyncSRCConverterLatency(sessionID: UUID) -> Double? {
+        (routes[sessionID]?.playthrough as? AsyncSRCPlaythrough)?
+            .converterLatencySeconds
+    }
+
+    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency? {
+        guard let resources = routes[sessionID],
+              let playthrough = resources.playthrough else { return nil }
+        guard let convertedPlaythrough = playthrough as? AsyncSRCPlaythrough else {
+            return CoreAudioRouteLatency(
+                estimatedApplicationSeconds: 0,
+                maximumApplicationSeconds: 0,
+                isLowLatency: true,
+                requiresBufferEscalation: false
+            )
+        }
+        let metrics = convertedPlaythrough.metrics
+        let callbackExceededConfiguredQuantum = metrics.map {
+            if let expectedInputCallbackFrames =
+                resources.expectedInputCallbackFrames,
+               $0.maximumInputCallbackFrames > expectedInputCallbackFrames {
+                return true
+            }
+            if let expectedOutputCallbackFrames =
+                resources.expectedOutputCallbackFrames,
+               $0.maximumOutputCallbackFrames > expectedOutputCallbackFrames {
+                return true
+            }
+            return false
+        } ?? false
+        let escalationReasons = metrics.map {
+            Self.bufferEscalationReasons(
+                metrics: $0,
+                callbackExceededConfiguredQuantum:
+                    callbackExceededConfiguredQuantum,
+                missedCallbackDeadline:
+                    convertedPlaythrough.hasMissedCallbackDeadline
+            )
+        } ?? []
+        return CoreAudioRouteLatency(
+            estimatedApplicationSeconds:
+                convertedPlaythrough.currentApplicationLatencySeconds,
+            maximumApplicationSeconds:
+                convertedPlaythrough.maximumApplicationLatencySeconds,
+            isLowLatency: convertedPlaythrough.isLowLatency,
+            requiresBufferEscalation: !escalationReasons.isEmpty,
+            bufferEscalationReason: escalationReasons.isEmpty
+                ? nil
+                : escalationReasons.joined(separator: ", ")
+        )
+    }
+
+    nonisolated static func requiresBufferEscalation(
+        metrics: AsyncSRCMetrics,
+        callbackExceededConfiguredQuantum: Bool,
+        missedCallbackDeadline: Bool
+    ) -> Bool {
+        !bufferEscalationReasons(
+            metrics: metrics,
+            callbackExceededConfiguredQuantum: callbackExceededConfiguredQuantum,
+            missedCallbackDeadline: missedCallbackDeadline
+        ).isEmpty
+    }
+
+    nonisolated static func bufferEscalationReasons(
+        metrics: AsyncSRCMetrics,
+        callbackExceededConfiguredQuantum: Bool,
+        missedCallbackDeadline: Bool
+    ) -> [String] {
+        var reasons: [String] = []
+        if metrics.inputRenderErrorCount > 0 {
+            reasons.append("input render errors: \(metrics.inputRenderErrorCount)")
+        }
+        if metrics.outputRenderErrorCount > 0 {
+            reasons.append("output render errors: \(metrics.outputRenderErrorCount)")
+        }
+        if metrics.rateParameterErrorCount > 0 {
+            reasons.append("converter rate errors: \(metrics.rateParameterErrorCount)")
+        }
+        if metrics.latencyCeilingOverflowCount > 0 {
+            reasons.append(
+                "FIFO writes above latency ceiling: \(metrics.latencyCeilingOverflowCount)"
+            )
+        }
+        if metrics.inputCallbackFrameLimitExceededCount > 0 {
+            reasons.append(
+                "input callback frame-limit violations: \(metrics.inputCallbackFrameLimitExceededCount)"
+            )
+        }
+        if metrics.outputCallbackFrameLimitExceededCount > 0 {
+            reasons.append(
+                "output callback frame-limit violations: \(metrics.outputCallbackFrameLimitExceededCount)"
+            )
+        }
+        if metrics.overflowCount > 0 {
+            reasons.append("FIFO overflows: \(metrics.overflowCount)")
+        }
+        if metrics.resynchronizationCount > 0 {
+            reasons.append("FIFO resynchronizations: \(metrics.resynchronizationCount)")
+        }
+        if metrics.droppedInputFrames > 0 {
+            reasons.append("dropped input frames: \(metrics.droppedInputFrames)")
+        }
+        if metrics.latencyCeilingUnderrunCount > 0 {
+            reasons.append(
+                "FIFO underruns at latency ceiling: \(metrics.latencyCeilingUnderrunCount)"
+            )
+        }
+        if callbackExceededConfiguredQuantum {
+            reasons.append("callback exceeded the configured frame quantum")
+        }
+        if missedCallbackDeadline {
+            reasons.append("callback execution exceeded its real-time deadline")
+        }
+        return reasons
+    }
+
     func shutdown() -> [String] {
+        listenerCleanupRetryTask?.cancel()
+        listenerCleanupRetryTask = nil
         var failures: [String] = []
         for sessionID in Array(routes.keys) {
             failures.append(contentsOf: stopAndDestroyRoute(sessionID: sessionID))
@@ -515,10 +691,11 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             legacyCoreAudioLogger.debug("Direct: aggregate destroyed")
         }
 
-        failures.append(
-            contentsOf: restoreBufferFrameSizes(resources.bufferFrameSizeRestores)
+        let restoreResult = restoreBufferFrameSizes(
+            resources.bufferFrameSizeRestores
         )
-        resources.bufferFrameSizeRestores.removeAll()
+        failures.append(contentsOf: restoreResult.failures)
+        resources.bufferFrameSizeRestores = restoreResult.retryableRestores
         return failures
     }
 
@@ -542,6 +719,65 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             return LegacyRouteFailure.auHAL(failure)
         }
         return error
+    }
+
+    private func prepareSynchronizedPlaythrough(
+        input: AudioDeviceDescriptor,
+        output: AudioDeviceDescriptor,
+        inputDeviceID: AudioDeviceID,
+        outputDeviceID: AudioDeviceID,
+        nominalSampleRate: Double,
+        requestedBufferFrameSize: UInt32?,
+        resources: RouteResources,
+        validateOwnership: () throws -> Void
+    ) throws {
+        let routeDeviceID: AudioDeviceID
+        let inputChannelOffset: Int
+        if input.id == output.id {
+            routeDeviceID = inputDeviceID
+            inputChannelOffset = 0
+        } else {
+            try validateOwnership()
+            let createdAggregateID: AudioDeviceID
+            do {
+                createdAggregateID = try createAggregateDevice(
+                    input: input,
+                    output: output,
+                    nominalSampleRate: nominalSampleRate,
+                    requestedBufferFrameSize: requestedBufferFrameSize
+                )
+            } catch let failure as RetainedAggregateConstructionFailure {
+                resources.aggregateDeviceID = failure.aggregateDeviceID
+                legacyCoreAudioLogger.error(
+                    "Initial aggregate cleanup failed: \(failure.cleanupStatus)"
+                )
+                throw failure.primaryError
+            }
+            resources.aggregateDeviceID = createdAggregateID
+            routeDeviceID = createdAggregateID
+            inputChannelOffset = output.inputChannelCount
+        }
+
+        do {
+            try validateOwnership()
+            resources.playthrough = try AUHALPlaythrough.make(
+                deviceID: routeDeviceID,
+                inputChannelCount: input.inputChannelCount,
+                inputChannelOffset: inputChannelOffset,
+                outputChannelCount: output.outputChannelCount,
+                nominalSampleRate: nominalSampleRate
+            )
+        } catch let failure as AUHALRetainedConstructionFailure {
+            resources.playthrough = failure.playthrough
+            failure.cleanupFailures.forEach {
+                legacyCoreAudioLogger.error("\($0, privacy: .public)")
+            }
+            throw translatedConstructionError(failure.primaryError)
+        } catch let failure as AUHALCreationFailure {
+            throw LegacyRouteFailure.auHALCreation(failure.status)
+        } catch let failure as AUHALSetupFailure {
+            throw LegacyRouteFailure.auHAL(failure)
+        }
     }
 
     private var nominalSampleRateAddress: AudioObjectPropertyAddress {
@@ -606,8 +842,73 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         )
     }
 
+    private func addListenerIfNeeded(
+        objectID: AudioObjectID,
+        address: AudioObjectPropertyAddress
+    ) throws {
+        guard !listeners.contains(where: {
+            $0.objectID == objectID
+                && $0.address.mSelector == address.mSelector
+                && $0.address.mScope == address.mScope
+                && $0.address.mElement == address.mElement
+        }) else {
+            return
+        }
+        try addListener(objectID: objectID, address: address)
+    }
+
+    private func scheduleListenerCleanupRetry(attempt: Int) {
+        guard attempt <= Self.listenerCleanupRetryLimit else { return }
+        let delay = Self.listenerCleanupRetryBaseNanoseconds
+            * UInt64(1 << (attempt - 1))
+        let retrySleep = listenerCleanupRetrySleep
+        listenerCleanupRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await retrySleep(delay)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self else { return }
+                legacyCoreAudioLogger.debug(
+                    "CoreAudio listener retry delay failed: \(error.localizedDescription, privacy: .public)"
+                )
+                self.continueListenerCleanupRetry(after: attempt)
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            do {
+                let requiresAnotherRetry = try self.reconcileListeners()
+                if requiresAnotherRetry {
+                    self.continueListenerCleanupRetry(after: attempt)
+                } else {
+                    self.listenerCleanupRetryTask = nil
+                }
+            } catch {
+                legacyCoreAudioLogger.debug(
+                    "CoreAudio listener retry reconciliation failed: \(error.localizedDescription, privacy: .public)"
+                )
+                self.continueListenerCleanupRetry(after: attempt)
+            }
+        }
+    }
+
+    private func continueListenerCleanupRetry(after attempt: Int) {
+        if attempt < Self.listenerCleanupRetryLimit {
+            scheduleListenerCleanupRetry(attempt: attempt + 1)
+        } else {
+            listenerCleanupRetryTask = nil
+            legacyCoreAudioLogger.debug(
+                "CoreAudio listener cleanup remains pending after the bounded retry window."
+            )
+        }
+    }
+
     var listenerRegistrationCountForTesting: Int {
         listeners.count
+    }
+
+    var listenerCleanupRetryScheduledForTesting: Bool {
+        listenerCleanupRetryTask != nil
     }
 
     func installListenerRegistrationForTesting(
@@ -648,6 +949,41 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             operation: "Resolve device UID \(uid.rawValue)",
             status: kAudioHardwareBadDeviceError
         )
+    }
+
+    private func devicePresence(for uid: AudioDeviceUID) -> Bool? {
+        let deviceIDs: [AudioDeviceID]
+        do {
+            deviceIDs = try allDeviceIDs()
+        } catch {
+            legacyCoreAudioLogger.debug(
+                "Could not enumerate CoreAudio devices while classifying buffer restoration for \(uid.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+
+        var encounteredUnreadableDevice = false
+        for deviceID in deviceIDs {
+            do {
+                let candidateUID = try CoreAudioPropertyReader.readString(
+                    objectID: deviceID,
+                    address: AudioObjectPropertyAddress(
+                        mSelector: kAudioDevicePropertyDeviceUID,
+                        mScope: kAudioObjectPropertyScopeGlobal,
+                        mElement: kAudioObjectPropertyElementMain
+                    )
+                )
+                if candidateUID == uid.rawValue {
+                    return true
+                }
+            } catch {
+                encounteredUnreadableDevice = true
+                legacyCoreAudioLogger.debug(
+                    "Could not read CoreAudio device \(deviceID) while classifying buffer restoration for \(uid.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+        return encounteredUnreadableDevice ? nil : false
     }
 
     private func isOwnedAggregate(deviceID: AudioDeviceID) throws -> Bool {
@@ -1140,23 +1476,23 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
 
     private func restoreBufferFrameSizes(
         _ restores: [BufferFrameSizeRestore]
-    ) -> [String] {
-        var failures: [String] = []
-        for restore in restores.reversed() {
-            do {
+    ) -> BufferFrameSizeRestoreResult {
+        Self.reconcileBufferFrameSizeRestores(
+            restores,
+            attemptRestore: { [self] restore in
                 let restoredDeviceID = try deviceID(for: restore.deviceUID)
                 let currentFrameCount = try CoreAudioPropertyReader.readUInt32(
                     objectID: restoredDeviceID,
                     address: bufferFrameSizeAddress
                 )
                 if currentFrameCount == restore.frameCount {
-                    continue
+                    return
                 }
                 guard currentFrameCount == restore.appliedFrameCount else {
                     legacyCoreAudioLogger.warning(
                         "Not restoring buffer frame size for \(restore.deviceUID.rawValue, privacy: .public) because another client changed it to \(currentFrameCount)"
                     )
-                    continue
+                    return
                 }
                 try CoreAudioPropertyReader.writeUInt32(
                     restore.frameCount,
@@ -1167,18 +1503,47 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
                     objectID: restoredDeviceID,
                     address: bufferFrameSizeAddress
                 )
-                if observedFrameCount != restore.frameCount {
-                    failures.append(
-                        "restore buffer frame size for \(restore.deviceUID.rawValue): expected \(restore.frameCount), observed \(observedFrameCount)"
+                guard observedFrameCount == restore.frameCount else {
+                    throw BufferFrameSizeRestoreReadbackFailure(
+                        deviceUID: restore.deviceUID,
+                        expectedFrameCount: restore.frameCount,
+                        observedFrameCount: observedFrameCount
                     )
                 }
+            },
+            isDevicePresent: { [self] uid in
+                devicePresence(for: uid)
+            }
+        )
+    }
+
+    static func reconcileBufferFrameSizeRestores(
+        _ restores: [BufferFrameSizeRestore],
+        attemptRestore: (BufferFrameSizeRestore) throws -> Void,
+        isDevicePresent: (AudioDeviceUID) -> Bool?
+    ) -> BufferFrameSizeRestoreResult {
+        var retryableRestores: [BufferFrameSizeRestore] = []
+        var failures: [String] = []
+        for restore in restores.reversed() {
+            do {
+                try attemptRestore(restore)
             } catch {
+                if isDevicePresent(restore.deviceUID) == false {
+                    legacyCoreAudioLogger.debug(
+                        "Discarding buffer frame size restoration for disconnected device \(restore.deviceUID.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    )
+                    continue
+                }
+                retryableRestores.append(restore)
                 failures.append(
                     "restore buffer frame size for \(restore.deviceUID.rawValue): \(error.localizedDescription)"
                 )
             }
         }
-        return failures
+        return BufferFrameSizeRestoreResult(
+            retryableRestores: Array(retryableRestores.reversed()),
+            failures: failures
+        )
     }
 
     private func immediateBufferRestoreSuffix(

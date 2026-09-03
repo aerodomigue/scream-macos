@@ -1,4 +1,5 @@
 @testable import ScreamBar
+import CoreAudio
 import XCTest
 
 @MainActor
@@ -36,7 +37,7 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         XCTAssertFalse(restoredRoute.route.isUsingOutputFallback)
     }
 
-    func testPresentButIncompatiblePreferredOutputDoesNotFallBack() async {
+    func testPresentPreferredOutputWithoutCommonRateUsesConversionWithoutFallback() async throws {
         let defaultOutput = makeDevice(uid: "output.default", supportsInput: false)
         let incompatibleOutput = makeDevice(
             uid: "output.incompatible",
@@ -53,20 +54,542 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         )
         let service = makeService(backend: backend)
 
-        do {
-            _ = try await service.prepareRoute(
-                inputSelection: .device(uid: input.id, lastKnownName: input.name),
-                outputSelection: .device(
-                    uid: incompatibleOutput.id,
-                    lastKnownName: incompatibleOutput.name
-                )
+        let route = try await service.prepareRoute(
+            inputSelection: .device(uid: input.id, lastKnownName: input.name),
+            outputSelection: .device(
+                uid: incompatibleOutput.id,
+                lastKnownName: incompatibleOutput.name
             )
-            XCTFail("Expected incompatible preferred output to fail")
-        } catch AudioRoutingError.noCommonSampleRate {
-            XCTAssertTrue(backend.preparedRoutes.isEmpty)
-        } catch {
-            XCTFail("Unexpected error: \(error)")
+        )
+
+        XCTAssertEqual(route.route.output.id, incompatibleOutput.id)
+        XCTAssertFalse(route.route.isUsingOutputFallback)
+        XCTAssertEqual(
+            route.route.sampleRatePlan,
+            .converted(inputSampleRate: 48_000, outputSampleRate: 44_100)
+        )
+        XCTAssertEqual(backend.preparedRoutes.first?.sampleRatePlan, route.route.sampleRatePlan)
+        XCTAssertEqual(backend.preparedRoutes.first?.requestedBufferFrameSize, 64)
+        XCTAssertEqual(route.route.bufferFrameSize, 64)
+    }
+
+    func testAutomaticConvertedRouteEscalatesBufferAfterRuntimeDisruption() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        let logStore = RollingLogStore()
+        backend.routeLatencyValue = CoreAudioRouteLatency(
+            estimatedApplicationSeconds: 0.004,
+            maximumApplicationSeconds: 0.005,
+            isLowLatency: true,
+            requiresBufferEscalation: true,
+            bufferEscalationReason: "FIFO underruns at latency ceiling: 1"
+        )
+        let rebuilt = expectation(description: "route rebuilt at the next buffer tier")
+        backend.onPrepareRoute = {
+            guard backend.preparedRoutes.count == 2 else { return }
+            backend.routeLatencyValue = CoreAudioRouteLatency(
+                estimatedApplicationSeconds: 0.011,
+                maximumApplicationSeconds: 0.018,
+                isLowLatency: false,
+                requiresBufferEscalation: false
+            )
+            rebuilt.fulfill()
         }
+        let routingService = DirectAudioRoutingService(
+            logStore: logStore,
+            deviceService: makeService(backend: backend),
+            permissionService: AudioInputPermissionSpy()
+        )
+
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await fulfillment(of: [rebuilt], timeout: 2)
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(
+            backend.preparedRoutes.map(\.requestedBufferFrameSize),
+            [64, 128]
+        )
+        XCTAssertTrue(
+            logStore.entries.contains {
+                $0.message.contains("FIFO underruns at latency ceiling: 1")
+            }
+        )
+        try await routingService.stopAndWait()
+    }
+
+    func testAutomaticConvertedRouteExhaustsEveryBufferTierBeforeFailing() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000,
+            maximumBufferFrameSize: 512
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100,
+            maximumBufferFrameSize: 512
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        backend.routeLatencyValue = CoreAudioRouteLatency(
+            estimatedApplicationSeconds: 0.035,
+            maximumApplicationSeconds: 0.050,
+            isLowLatency: false,
+            requiresBufferEscalation: true,
+            bufferEscalationReason: "persistent injected instability"
+        )
+        let terminalStop = expectation(
+            description: "route stopped after exhausting every buffer tier"
+        )
+        let logStore = RollingLogStore()
+        backend.onStopRoute = {
+            guard backend.stoppedSessionIDs.count == 4 else { return }
+            terminalStop.fulfill()
+        }
+        let routingService = DirectAudioRoutingService(
+            logStore: logStore,
+            deviceService: makeService(backend: backend),
+            permissionService: AudioInputPermissionSpy()
+        )
+
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await fulfillment(of: [terminalStop], timeout: 4)
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(
+            backend.preparedRoutes.map(\.requestedBufferFrameSize),
+            [64, 128, 256, 512]
+        )
+        XCTAssertEqual(backend.startedSessionIDs.count, 4)
+        XCTAssertEqual(backend.stoppedSessionIDs.count, 4)
+        XCTAssertFalse(routingService.desiredRunning)
+        guard case .failed(.latencyStabilityLimitExceeded(let context)) =
+            routingService.state else {
+            return XCTFail("Expected a terminal latency stability failure")
+        }
+        XCTAssertEqual(context.bufferFrameCount, 512)
+        XCTAssertEqual(context.estimatedApplicationLatencySeconds, 0.035)
+        XCTAssertTrue(
+            logStore.entries.contains {
+                $0.message == "Direct Routing stopping after the automatic buffer ladder was exhausted (buffer tier: 512 frames, app latency: 35.0 ms, maximum: 50.0 ms, reason: persistent injected instability)"
+            }
+        )
+        XCTAssertTrue(
+            logStore.entries.contains {
+                $0.message.contains(
+                    "buffer policy: automatic, effective tier: 64 frames"
+                )
+            }
+        )
+    }
+
+    func testExplicitBufferInstabilityReportsPolicyWithoutClaimingLadderExhaustion() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        backend.routeLatencyValue = CoreAudioRouteLatency(
+            estimatedApplicationSeconds: 0.0089,
+            maximumApplicationSeconds: 0.010,
+            isLowLatency: true,
+            requiresBufferEscalation: true,
+            bufferEscalationReason: "callback execution exceeded its real-time deadline"
+        )
+        let stopped = expectation(description: "explicit unstable route stopped")
+        backend.onStopRoute = { stopped.fulfill() }
+        let logStore = RollingLogStore()
+        let routingService = DirectAudioRoutingService(
+            logStore: logStore,
+            deviceService: makeService(backend: backend),
+            permissionService: AudioInputPermissionSpy()
+        )
+
+        routingService.start(
+            configuration: DirectRoutingConfiguration(bufferSize: .frames64)
+        )
+        await fulfillment(of: [stopped], timeout: 2)
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(
+            backend.preparedRoutes.map(\.requestedBufferFrameSize),
+            [64]
+        )
+        XCTAssertTrue(
+            logStore.entries.contains {
+                $0.message == "Direct Routing stopping because the explicit 64-frame buffer became unstable (app latency: 8.9 ms, maximum: 10.0 ms, reason: callback execution exceeded its real-time deadline)"
+            }
+        )
+        XCTAssertFalse(
+            logStore.entries.contains {
+                $0.message.contains("automatic buffer ladder was exhausted")
+            }
+        )
+        XCTAssertTrue(
+            logStore.entries.contains {
+                $0.message.contains(
+                    "buffer policy: explicit 64 frames, effective tier: 64 frames"
+                )
+            }
+        )
+    }
+
+    func testAutomaticBufferEscalationResetsWhenEffectiveOutputChanges() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000
+        )
+        let firstOutput = makeDevice(
+            uid: "output.first",
+            supportsInput: false,
+            sampleRate: 44_100
+        )
+        let replacementOutput = makeDevice(
+            uid: "output.replacement",
+            supportsInput: false,
+            sampleRate: 44_100
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, firstOutput],
+                input: input,
+                output: firstOutput
+            )
+        )
+        backend.routeLatencyValue = CoreAudioRouteLatency(
+            estimatedApplicationSeconds: 0.004,
+            maximumApplicationSeconds: 0.005,
+            isLowLatency: true,
+            requiresBufferEscalation: true
+        )
+        let escalated = expectation(description: "first route escalated to 128 frames")
+        backend.onPrepareRoute = {
+            guard backend.preparedRoutes.count == 2 else { return }
+            backend.routeLatencyValue = CoreAudioRouteLatency(
+                estimatedApplicationSeconds: 0.006,
+                maximumApplicationSeconds: 0.009,
+                isLowLatency: true,
+                requiresBufferEscalation: false
+            )
+            escalated.fulfill()
+        }
+        let timing = ControlledCoreAudioTiming()
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: CoreAudioDeviceService(
+                logStore: RollingLogStore(),
+                backend: backend,
+                timing: timing.makeTiming()
+            ),
+            permissionService: AudioInputPermissionSpy()
+        )
+
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await fulfillment(of: [escalated], timeout: 2)
+        await routingService.waitForIdle()
+
+        let rebuilt = expectation(
+            description: "replacement output starts from the lowest automatic tier"
+        )
+        backend.onPrepareRoute = {
+            guard backend.preparedRoutes.count == 3 else { return }
+            rebuilt.fulfill()
+        }
+        backend.snapshot = makeSnapshot(
+            devices: [input, replacementOutput],
+            input: input,
+            output: replacementOutput
+        )
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+
+        await fulfillment(of: [rebuilt], timeout: 2)
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(
+            backend.preparedRoutes.map(\.requestedBufferFrameSize),
+            [64, 128, 64]
+        )
+        try await routingService.stopAndWait()
+    }
+
+    func testAutomaticBufferEscalationResetsWhenOverrideIsNoLongerSupported() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        backend.routeLatencyValue = CoreAudioRouteLatency(
+            estimatedApplicationSeconds: 0.004,
+            maximumApplicationSeconds: 0.005,
+            isLowLatency: true,
+            requiresBufferEscalation: true
+        )
+        let escalated = expectation(description: "route escalated to 128 frames")
+        backend.onPrepareRoute = {
+            guard backend.preparedRoutes.count == 2 else { return }
+            backend.routeLatencyValue = CoreAudioRouteLatency(
+                estimatedApplicationSeconds: 0.006,
+                maximumApplicationSeconds: 0.009,
+                isLowLatency: true,
+                requiresBufferEscalation: false
+            )
+            escalated.fulfill()
+        }
+        let timing = ControlledCoreAudioTiming()
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: CoreAudioDeviceService(
+                logStore: RollingLogStore(),
+                backend: backend,
+                timing: timing.makeTiming()
+            ),
+            permissionService: AudioInputPermissionSpy()
+        )
+
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await fulfillment(of: [escalated], timeout: 2)
+        await routingService.waitForIdle()
+
+        let recalculated = expectation(
+            description: "unsupported override recalculated from current capabilities"
+        )
+        backend.onPrepareRoute = {
+            guard backend.preparedRoutes.count == 3 else { return }
+            recalculated.fulfill()
+        }
+        let restrictedOutput = makeDevice(
+            uid: output.id.rawValue,
+            supportsInput: false,
+            sampleRate: output.currentNominalSampleRate,
+            currentBufferFrameSize: 64,
+            minimumBufferFrameSize: 64,
+            maximumBufferFrameSize: 64
+        )
+        backend.snapshot = makeSnapshot(
+            devices: [input, restrictedOutput],
+            input: input,
+            output: restrictedOutput
+        )
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+
+        await fulfillment(of: [recalculated], timeout: 2)
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(
+            backend.preparedRoutes.map(\.requestedBufferFrameSize),
+            [64, 128, 64]
+        )
+        try await routingService.stopAndWait()
+    }
+
+    func testAutomaticConvertedRouteRetriesWhenInitialBufferCannotBeConfigured() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        backend.prepareRouteErrors = [
+            LegacyRouteFailure.bufferFrameSizeConfiguration(
+                BufferFrameSizeConfigurationContext(
+                    deviceUID: output.id,
+                    requestedFrameCount: 64,
+                    observedFrameCount: 512,
+                    operation: "test rejection"
+                )
+            ),
+        ]
+        let rebuilt = expectation(description: "route retried at 128 frames")
+        backend.onPrepareRoute = {
+            guard backend.preparedRoutes.count == 2 else { return }
+            rebuilt.fulfill()
+        }
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: makeService(backend: backend),
+            permissionService: AudioInputPermissionSpy()
+        )
+
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await fulfillment(of: [rebuilt], timeout: 2)
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(
+            backend.preparedRoutes.map(\.requestedBufferFrameSize),
+            [64, 128]
+        )
+        guard case .running(let route) = routingService.state else {
+            return XCTFail("Expected the retried route to be running")
+        }
+        XCTAssertEqual(route.bufferFrameSize, 128)
+        try await routingService.stopAndWait()
+    }
+
+    func testAutomaticRouteStopsWhenLastBufferTierRemainsUnstable() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000,
+            minimumBufferFrameSize: 512
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100,
+            minimumBufferFrameSize: 512
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        backend.routeLatencyValue = CoreAudioRouteLatency(
+            estimatedApplicationSeconds: 0.035,
+            maximumApplicationSeconds: 0.050,
+            isLowLatency: false,
+            requiresBufferEscalation: true
+        )
+        let stopped = expectation(description: "unstable last-tier route stopped")
+        backend.onStopRoute = { stopped.fulfill() }
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: makeService(backend: backend),
+            permissionService: AudioInputPermissionSpy()
+        )
+
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await fulfillment(of: [stopped], timeout: 2)
+
+        XCTAssertFalse(routingService.desiredRunning)
+        XCTAssertEqual(
+            backend.preparedRoutes.map(\.requestedBufferFrameSize),
+            [512]
+        )
+        guard case .failed(.latencyStabilityLimitExceeded(let context)) =
+            routingService.state else {
+            return XCTFail("Expected an explicit latency stability failure")
+        }
+        XCTAssertEqual(context.bufferFrameCount, 512)
+        XCTAssertEqual(context.estimatedApplicationLatencySeconds, 0.035)
+    }
+
+    func testAutomaticRouteWithoutSupportedTierStopsInsteadOfTryingInvalidBuffers() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000,
+            currentBufferFrameSize: 1_024,
+            minimumBufferFrameSize: 1_024,
+            maximumBufferFrameSize: 2_048
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100,
+            currentBufferFrameSize: 1_024,
+            minimumBufferFrameSize: 1_024,
+            maximumBufferFrameSize: 2_048
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        backend.routeLatencyValue = CoreAudioRouteLatency(
+            estimatedApplicationSeconds: 0.080,
+            maximumApplicationSeconds: 0.120,
+            isLowLatency: false,
+            requiresBufferEscalation: true
+        )
+        let stopped = expectation(
+            description: "unstable native-buffer fallback route stopped"
+        )
+        backend.onStopRoute = { stopped.fulfill() }
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: makeService(backend: backend),
+            permissionService: AudioInputPermissionSpy()
+        )
+
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await fulfillment(of: [stopped], timeout: 2)
+
+        XCTAssertEqual(
+            backend.preparedRoutes.map(\.requestedBufferFrameSize),
+            [nil]
+        )
+        XCTAssertFalse(routingService.desiredRunning)
+        guard case .failed(.latencyStabilityLimitExceeded(let context)) =
+            routingService.state else {
+            return XCTFail("Expected an explicit latency stability failure")
+        }
+        XCTAssertNil(context.bufferFrameCount)
+        XCTAssertEqual(context.estimatedApplicationLatencySeconds, 0.080)
     }
 
     func testSameDeviceRouteIsPreparedOnceAtNegotiatedRate() async throws {
@@ -110,6 +633,67 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         )
 
         XCTAssertEqual(backend.preparedRoutes.first?.requestedBufferFrameSize, 128)
+    }
+
+    func testCommonOutputRateIsSelectedAutomaticallyAndAppliedToInput() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000,
+            supportedRates: [44_100, 48_000]
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100,
+            supportedRates: [44_100, 48_000]
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(devices: [input, output], input: input, output: output)
+        )
+        let service = makeService(backend: backend)
+
+        let route = try await service.prepareRoute(
+            inputSelection: .systemDefault,
+            outputSelection: .systemDefault
+        )
+
+        XCTAssertEqual(route.route.nominalSampleRate, 44_100)
+        XCTAssertEqual(route.route.sampleRatePlan, .synchronized(sampleRate: 44_100))
+        XCTAssertEqual(backend.sampleRateWrites.count, 1)
+        XCTAssertEqual(backend.sampleRateWrites[0].uid, input.id)
+        XCTAssertEqual(backend.sampleRateWrites[0].rate, 44_100)
+    }
+
+    func testNoCommonRatePreservesIndependentHardwareRatesForConversion() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000,
+            supportedRates: [48_000]
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100,
+            supportedRates: [16_000, 44_100]
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(devices: [input, output], input: input, output: output)
+        )
+        let service = makeService(backend: backend)
+
+        let route = try await service.prepareRoute(
+            inputSelection: .systemDefault,
+            outputSelection: .systemDefault
+        )
+
+        XCTAssertEqual(
+            route.route.sampleRatePlan,
+            .converted(inputSampleRate: 48_000, outputSampleRate: 44_100)
+        )
+        XCTAssertTrue(backend.sampleRateWrites.isEmpty)
+        XCTAssertEqual(backend.preparedRoutes.first?.sampleRatePlan, route.route.sampleRatePlan)
     }
 
     func testStalePreparationDrainsBeforeReplacementMutatesHardware() async throws {
@@ -357,6 +941,261 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         XCTAssertEqual(route.input.inputChannelCount, 1)
     }
 
+    func testUnselectedHDMIDeviceAddAndRemovalDoNotRebuildActiveRoute() async throws {
+        let input = makeDevice(uid: "input", supportsOutput: false)
+        let output = makeDevice(uid: "selected-output", supportsInput: false)
+        let hdmi = makeDevice(uid: "unselected-hdmi", supportsInput: false)
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        let timing = ControlledCoreAudioTiming()
+        let logStore = RollingLogStore()
+        let routingService = DirectAudioRoutingService(
+            logStore: logStore,
+            deviceService: CoreAudioDeviceService(
+                logStore: logStore,
+                backend: backend,
+                timing: timing.makeTiming()
+            ),
+            permissionService: AudioInputPermissionSpy()
+        )
+        let configuration = DirectRoutingConfiguration(
+            inputSelection: .device(uid: input.id, lastKnownName: input.name),
+            outputSelection: .device(uid: output.id, lastKnownName: output.name)
+        )
+        routingService.start(configuration: configuration)
+        await routingService.waitForIdle()
+
+        let addedSnapshot = expectation(description: "HDMI addition snapshot published")
+        backend.onMakeSnapshot = addedSnapshot.fulfill
+        backend.snapshot = makeSnapshot(
+            devices: [input, output, hdmi],
+            input: input,
+            output: output
+        )
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+        await fulfillment(of: [addedSnapshot])
+        await routingService.waitForIdle()
+
+        let removedSnapshot = expectation(description: "HDMI removal snapshot published")
+        backend.onMakeSnapshot = removedSnapshot.fulfill
+        backend.snapshot = makeSnapshot(
+            devices: [input, output],
+            input: input,
+            output: output
+        )
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+        await fulfillment(of: [removedSnapshot])
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(backend.preparedRoutes.count, 1)
+        XCTAssertTrue(backend.stoppedSessionIDs.isEmpty)
+        XCTAssertFalse(
+            logStore.entries.contains {
+                $0.message == "Direct Routing rebuilding after hardware change"
+            }
+        )
+        guard case .running(let route) = routingService.state else {
+            return XCTFail("Expected the original route to remain active")
+        }
+        XCTAssertEqual(route.output.id, output.id)
+    }
+
+    func testDefaultOutputChangeDoesNotRebuildAvailableExplicitOutput() async throws {
+        let input = makeDevice(uid: "input", supportsOutput: false)
+        let preferred = makeDevice(uid: "preferred-output", supportsInput: false)
+        let speakers = makeDevice(uid: "speakers", supportsInput: false)
+        let hdmi = makeDevice(uid: "hdmi", supportsInput: false)
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, preferred, speakers, hdmi],
+                input: input,
+                output: speakers
+            )
+        )
+        let timing = ControlledCoreAudioTiming()
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: CoreAudioDeviceService(
+                logStore: RollingLogStore(),
+                backend: backend,
+                timing: timing.makeTiming()
+            ),
+            permissionService: AudioInputPermissionSpy()
+        )
+        routingService.start(
+            configuration: DirectRoutingConfiguration(
+                inputSelection: .device(uid: input.id, lastKnownName: input.name),
+                outputSelection: .device(
+                    uid: preferred.id,
+                    lastKnownName: preferred.name
+                )
+            )
+        )
+        await routingService.waitForIdle()
+
+        let snapshotRefreshed = expectation(description: "new default snapshot published")
+        backend.onMakeSnapshot = snapshotRefreshed.fulfill
+        backend.snapshot = makeSnapshot(
+            devices: [input, preferred, speakers, hdmi],
+            input: input,
+            output: hdmi
+        )
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+        await fulfillment(of: [snapshotRefreshed])
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(backend.preparedRoutes.count, 1)
+        XCTAssertTrue(backend.stoppedSessionIDs.isEmpty)
+        guard case .running(let route) = routingService.state else {
+            return XCTFail("Expected the explicit route to remain active")
+        }
+        XCTAssertEqual(route.output.id, preferred.id)
+        XCTAssertFalse(route.isUsingOutputFallback)
+    }
+
+    func testExplicitOutputFallbackFollowsChangedSystemDefault() async throws {
+        let input = makeDevice(uid: "input", supportsOutput: false)
+        let missingPreferred = makeDevice(uid: "preferred-output", supportsInput: false)
+        let speakers = makeDevice(uid: "speakers", supportsInput: false)
+        let hdmi = makeDevice(uid: "hdmi", supportsInput: false)
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, speakers, hdmi],
+                input: input,
+                output: speakers
+            )
+        )
+        let timing = ControlledCoreAudioTiming()
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: CoreAudioDeviceService(
+                logStore: RollingLogStore(),
+                backend: backend,
+                timing: timing.makeTiming()
+            ),
+            permissionService: AudioInputPermissionSpy()
+        )
+        routingService.start(
+            configuration: DirectRoutingConfiguration(
+                inputSelection: .device(uid: input.id, lastKnownName: input.name),
+                outputSelection: .device(
+                    uid: missingPreferred.id,
+                    lastKnownName: missingPreferred.name
+                )
+            )
+        )
+        await routingService.waitForIdle()
+
+        let rebuilt = expectation(description: "fallback rebuilt for the new default")
+        backend.onPrepareRoute = {
+            if backend.preparedRoutes.count == 2 {
+                rebuilt.fulfill()
+            }
+        }
+        backend.snapshot = makeSnapshot(
+            devices: [input, speakers, hdmi],
+            input: input,
+            output: hdmi
+        )
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+
+        await fulfillment(of: [rebuilt])
+        await routingService.waitForIdle()
+        XCTAssertEqual(backend.preparedRoutes.count, 2)
+        XCTAssertEqual(backend.stoppedSessionIDs.count, 1)
+        guard case .running(let route) = routingService.state else {
+            return XCTFail("Expected the replacement fallback route to run")
+        }
+        XCTAssertEqual(route.output.id, hdmi.id)
+        XCTAssertTrue(route.isUsingOutputFallback)
+    }
+
+    func testActiveBufferPropertiesTriggerRouteRebuild() async throws {
+        let original = makeDevice(uid: "duplex")
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [original],
+                input: original,
+                output: original
+            )
+        )
+        let timing = ControlledCoreAudioTiming()
+        let routingService = DirectAudioRoutingService(
+            logStore: RollingLogStore(),
+            deviceService: CoreAudioDeviceService(
+                logStore: RollingLogStore(),
+                backend: backend,
+                timing: timing.makeTiming()
+            ),
+            permissionService: AudioInputPermissionSpy()
+        )
+        routingService.start(configuration: DirectRoutingConfiguration())
+        await routingService.waitForIdle()
+
+        let capabilityRebuilt = expectation(
+            description: "route rebuilt after active buffer capability change"
+        )
+        backend.onPrepareRoute = {
+            if backend.preparedRoutes.count == 2 {
+                capabilityRebuilt.fulfill()
+            }
+        }
+        let changedCapability = makeDevice(
+            uid: "duplex",
+            minimumBufferFrameSize: 128
+        )
+        backend.snapshot = makeSnapshot(
+            devices: [changedCapability],
+            input: changedCapability,
+            output: changedCapability
+        )
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+        await fulfillment(of: [capabilityRebuilt])
+        await routingService.waitForIdle()
+
+        let effectiveSizeRebuilt = expectation(
+            description: "route rebuilt after active effective buffer change"
+        )
+        backend.onPrepareRoute = {
+            if backend.preparedRoutes.count == 3 {
+                effectiveSizeRebuilt.fulfill()
+            }
+        }
+        let changedEffectiveSize = makeDevice(
+            uid: "duplex",
+            currentBufferFrameSize: 256,
+            minimumBufferFrameSize: 128
+        )
+        backend.snapshot = makeSnapshot(
+            devices: [changedEffectiveSize],
+            input: changedEffectiveSize,
+            output: changedEffectiveSize
+        )
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+        await fulfillment(of: [effectiveSizeRebuilt])
+        await routingService.waitForIdle()
+
+        XCTAssertEqual(backend.preparedRoutes.count, 3)
+        XCTAssertEqual(backend.stoppedSessionIDs.count, 2)
+    }
+
     func testSystemDefaultFollowsReplacementAfterDefaultOutputDisappears() async throws {
         let input = makeDevice(uid: "Auna Mic", supportsOutput: false)
         let bose = makeDevice(uid: "Bose QC45", supportsInput: false)
@@ -403,6 +1242,46 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         }
         XCTAssertEqual(route.output.id, speakers.id)
         XCTAssertFalse(route.isUsingOutputFallback)
+    }
+
+    func testListenerRebuildFailureDoesNotBlockNewDefaultSnapshotPublication() async {
+        let input = makeDevice(uid: "Auna Mic", supportsOutput: false)
+        let bose = makeDevice(uid: "Bose QC45", supportsInput: false)
+        let speakers = makeDevice(uid: "Mac mini Speakers", supportsInput: false)
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(devices: [input, bose], input: input, output: bose)
+        )
+        let timing = ControlledCoreAudioTiming()
+        let deviceService = CoreAudioDeviceService(
+            logStore: RollingLogStore(),
+            backend: backend,
+            timing: timing.makeTiming()
+        )
+        let snapshotPublished = expectation(
+            description: "new snapshot is published before listener reconciliation"
+        )
+        deviceService.onHardwareChanged = snapshotPublished.fulfill
+        backend.rebuildListenersErrors = [
+            CoreAudioBackendFailure(
+                operation: "Injected listener removal",
+                status: kAudioHardwareUnspecifiedError
+            ),
+        ]
+        backend.snapshot = makeSnapshot(
+            devices: [input, speakers],
+            input: input,
+            output: speakers
+        )
+
+        backend.emitHardwareChange()
+        await timing.waitUntilSuspended()
+        timing.resume()
+
+        await fulfillment(of: [snapshotPublished])
+        XCTAssertEqual(deviceService.snapshot.defaultOutputUID, speakers.id)
+        XCTAssertEqual(deviceService.snapshot.outputDevices.map(\.id), [speakers.id])
+        XCTAssertGreaterThan(deviceService.snapshot.revision, 1)
+        XCTAssertEqual(backend.rebuildListenersCount, 1)
     }
 
     func testSystemDefaultReturnsToReconnectedDeviceWhenMacOSMakesItDefault() async throws {
@@ -722,7 +1601,10 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         sampleRate: Double = 48_000,
         supportedRates: [Double]? = nil,
         nominalRanges: [NominalSampleRateRange]? = nil,
-        inputChannelCount: Int = 2
+        inputChannelCount: Int = 2,
+        currentBufferFrameSize: UInt32 = 512,
+        minimumBufferFrameSize: UInt32 = 64,
+        maximumBufferFrameSize: UInt32 = 2_048
     ) -> AudioDeviceDescriptor {
         AudioDeviceDescriptor(
             id: AudioDeviceUID(rawValue: uid),
@@ -735,10 +1617,10 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
                 ?? (supportedRates ?? [sampleRate]).map {
                     NominalSampleRateRange(minimum: $0, maximum: $0)
                 },
-            currentBufferFrameSize: 512,
+            currentBufferFrameSize: currentBufferFrameSize,
             supportedBufferFrameSizeRange: AudioBufferFrameSizeRange(
-                minimum: 64,
-                maximum: 2_048
+                minimum: minimumBufferFrameSize,
+                maximum: maximumBufferFrameSize
             )
         )
     }
@@ -762,7 +1644,7 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
     struct PreparedRouteCall: Equatable {
         let input: AudioDeviceDescriptor
         let output: AudioDeviceDescriptor
-        let nominalSampleRate: Double
+        let sampleRatePlan: AudioSampleRatePlan
         let requestedBufferFrameSize: UInt32?
     }
 
@@ -784,10 +1666,14 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
     var snapshotAfterPrepare: AudioHardwareSnapshot?
     var appliesSampleRateWritesImmediately = true
     var onPrepareRoute: (() -> Void)?
+    var onStopRoute: (() -> Void)?
     var onMakeSnapshot: (() -> Void)?
     var cleanupFailureBatches: [[String]] = []
     var unreleasedResourceFailures: [String] = []
     var startError: Error?
+    var prepareRouteErrors: [Error] = []
+    var rebuildListenersErrors: [Error] = []
+    var routeLatencyValue: CoreAudioRouteLatency?
     private var rates: [AudioDeviceUID: Double]
 
     init(snapshot: AudioHardwareSnapshot) {
@@ -803,6 +1689,9 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
 
     func rebuildListeners() throws {
         rebuildListenersCount += 1
+        if !rebuildListenersErrors.isEmpty {
+            throw rebuildListenersErrors.removeFirst()
+        }
     }
 
     func makeSnapshot(revision: UInt64) throws -> AudioHardwareSnapshot {
@@ -852,7 +1741,7 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
     func prepareRoute(
         input: AudioDeviceDescriptor,
         output: AudioDeviceDescriptor,
-        nominalSampleRate: Double,
+        sampleRatePlan: AudioSampleRatePlan,
         requestedBufferFrameSize: UInt32?,
         validateOwnership: () throws -> Void
     ) throws -> UUID {
@@ -861,10 +1750,13 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
             PreparedRouteCall(
                 input: input,
                 output: output,
-                nominalSampleRate: nominalSampleRate,
+                sampleRatePlan: sampleRatePlan,
                 requestedBufferFrameSize: requestedBufferFrameSize
             )
         )
+        if !prepareRouteErrors.isEmpty {
+            throw prepareRouteErrors.removeFirst()
+        }
         let sessionID = UUID()
         lastPreparedSessionID = sessionID
         if let snapshotAfterPrepare {
@@ -881,8 +1773,13 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
         }
     }
 
+    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency? {
+        routeLatencyValue
+    }
+
     func stopAndDestroyRoute(sessionID: UUID) -> [String] {
         stoppedSessionIDs.append(sessionID)
+        onStopRoute?()
         guard !cleanupFailureBatches.isEmpty else { return [] }
         return cleanupFailureBatches.removeFirst()
     }

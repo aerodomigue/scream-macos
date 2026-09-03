@@ -15,14 +15,37 @@ protocol CoreAudioBackend: AnyObject {
     func prepareRoute(
         input: AudioDeviceDescriptor,
         output: AudioDeviceDescriptor,
-        nominalSampleRate: Double,
+        sampleRatePlan: AudioSampleRatePlan,
         requestedBufferFrameSize: UInt32?,
         validateOwnership: () throws -> Void
     ) throws -> UUID
     func startRoute(sessionID: UUID) throws
+    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency?
     func stopAndDestroyRoute(sessionID: UUID) -> [String]
     func verifyRouteResourcesReleased() -> [String]
     func shutdown() -> [String]
+}
+
+struct CoreAudioRouteLatency: Equatable, Sendable {
+    let estimatedApplicationSeconds: Double
+    let maximumApplicationSeconds: Double
+    let isLowLatency: Bool
+    let requiresBufferEscalation: Bool
+    let bufferEscalationReason: String?
+
+    init(
+        estimatedApplicationSeconds: Double,
+        maximumApplicationSeconds: Double,
+        isLowLatency: Bool,
+        requiresBufferEscalation: Bool,
+        bufferEscalationReason: String? = nil
+    ) {
+        self.estimatedApplicationSeconds = estimatedApplicationSeconds
+        self.maximumApplicationSeconds = maximumApplicationSeconds
+        self.isLowLatency = isLowLatency
+        self.requiresBufferEscalation = requiresBufferEscalation
+        self.bufferEscalationReason = bufferEscalationReason
+    }
 }
 
 @MainActor

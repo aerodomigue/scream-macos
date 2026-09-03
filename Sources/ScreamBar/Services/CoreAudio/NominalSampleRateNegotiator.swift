@@ -27,39 +27,58 @@ enum NominalSampleRateNegotiator {
             )
         }
 
-        if contains(outputCurrentRate, in: commonRanges) {
-            return outputCurrentRate
-        }
-        if contains(preferredSampleRate, in: commonRanges) {
-            return preferredSampleRate
-        }
-        if contains(secondarySampleRate, in: commonRanges) {
-            return secondarySampleRate
-        }
+        return try preferredRate(
+            currentRate: outputCurrentRate,
+            ranges: commonRanges,
+            failureContext: SampleRateCompatibilityContext(
+                inputUID: inputUID,
+                outputUID: outputUID,
+                inputRanges: inputRanges,
+                outputRanges: outputRanges
+            )
+        )
+    }
 
-        let orderedCandidates = commonRanges
-            .map { range in
-                min(max(preferredSampleRate, range.minimum), range.maximum)
-            }
-            .sorted { leftRate, rightRate in
-                let leftDistance = abs(leftRate - preferredSampleRate)
-                let rightDistance = abs(rightRate - preferredSampleRate)
-                if abs(leftDistance - rightDistance) <= comparisonTolerance {
-                    return leftRate < rightRate
-                }
-                return leftDistance < rightDistance
-            }
-        guard let selectedRate = orderedCandidates.first else {
-            throw AudioRoutingError.noCommonSampleRate(
-                SampleRateCompatibilityContext(
-                    inputUID: inputUID,
-                    outputUID: outputUID,
-                    inputRanges: inputRanges,
-                    outputRanges: outputRanges
+    static func makePlan(
+        inputRanges: [NominalSampleRateRange],
+        inputCurrentRate: Double,
+        outputRanges: [NominalSampleRateRange],
+        outputCurrentRate: Double,
+        inputUID: AudioDeviceUID,
+        outputUID: AudioDeviceUID
+    ) throws -> AudioSampleRatePlan {
+        let context = SampleRateCompatibilityContext(
+            inputUID: inputUID,
+            outputUID: outputUID,
+            inputRanges: inputRanges,
+            outputRanges: outputRanges
+        )
+        let normalizedInputRanges = normalizedRanges(inputRanges)
+        let normalizedOutputRanges = normalizedRanges(outputRanges)
+        let commonRanges = intersections(normalizedInputRanges, normalizedOutputRanges)
+
+        if !commonRanges.isEmpty {
+            return .synchronized(
+                sampleRate: try preferredRate(
+                    currentRate: outputCurrentRate,
+                    ranges: commonRanges,
+                    failureContext: context
                 )
             )
         }
-        return selectedRate
+
+        return .converted(
+            inputSampleRate: try preferredRate(
+                currentRate: inputCurrentRate,
+                ranges: normalizedInputRanges,
+                failureContext: context
+            ),
+            outputSampleRate: try preferredRate(
+                currentRate: outputCurrentRate,
+                ranges: normalizedOutputRanges,
+                failureContext: context
+            )
+        )
     }
 
     static func ratesMatch(_ leftRate: Double, _ rightRate: Double) -> Bool {
@@ -123,5 +142,38 @@ enum NominalSampleRateNegotiator {
         ranges.contains { range in
             sampleRate >= range.minimum && sampleRate <= range.maximum
         }
+    }
+
+    private static func preferredRate(
+        currentRate: Double,
+        ranges: [NominalSampleRateRange],
+        failureContext: SampleRateCompatibilityContext
+    ) throws -> Double {
+        if contains(currentRate, in: ranges) {
+            return currentRate
+        }
+        if contains(preferredSampleRate, in: ranges) {
+            return preferredSampleRate
+        }
+        if contains(secondarySampleRate, in: ranges) {
+            return secondarySampleRate
+        }
+
+        let orderedCandidates = ranges
+            .map { range in
+                min(max(preferredSampleRate, range.minimum), range.maximum)
+            }
+            .sorted { leftRate, rightRate in
+                let leftDistance = abs(leftRate - preferredSampleRate)
+                let rightDistance = abs(rightRate - preferredSampleRate)
+                if abs(leftDistance - rightDistance) <= comparisonTolerance {
+                    return leftRate < rightRate
+                }
+                return leftDistance < rightDistance
+            }
+        guard let selectedRate = orderedCandidates.first else {
+            throw AudioRoutingError.noCommonSampleRate(failureContext)
+        }
+        return selectedRate
     }
 }

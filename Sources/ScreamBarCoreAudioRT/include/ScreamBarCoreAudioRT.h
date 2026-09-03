@@ -4,6 +4,9 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <stdint.h>
 
+#include "ScreamBarAsyncSRC.h"
+#include "ScreamBarSPSCRingBuffer.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

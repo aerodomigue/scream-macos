@@ -85,11 +85,25 @@ struct DirectRoutingSettingsView: View {
     private var routingStatus: some View {
         switch routingService.state {
         case .running(let route):
+            let bufferDescription = DirectRoutingBufferDescription.make(
+                configuredSize: configuration.bufferSize,
+                effectiveFrameCount: route.bufferFrameSize
+            )
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(route.input.name) → \(route.output.name)")
-                Text("\(Int(route.nominalSampleRate)) Hz")
+                Text(sampleRateDescription(route))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text("Buffer: \(bufferDescription)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let latencyDescription = applicationLatencyDescription(route) {
+                    Text(latencyDescription)
+                        .font(.caption)
+                        .foregroundStyle(
+                            route.isLowLatency ? Color.secondary : Color.orange
+                        )
+                }
                 if route.isUsingOutputFallback {
                     Text("Preferred output unavailable — using System Default")
                         .font(.caption)
@@ -111,5 +125,40 @@ struct DirectRoutingSettingsView: View {
         case .stopped, .starting, .reconfiguring, .stopping:
             EmptyView()
         }
+    }
+
+    private func sampleRateDescription(_ route: EffectiveAudioRoute) -> String {
+        if route.usesSampleRateConversion {
+            return "\(Int(route.inputNominalSampleRate)) → \(Int(route.outputNominalSampleRate)) Hz — converted"
+        }
+        return "\(Int(route.nominalSampleRate)) Hz"
+    }
+
+    private func applicationLatencyDescription(
+        _ route: EffectiveAudioRoute
+    ) -> String? {
+        guard route.usesSampleRateConversion,
+              let latencySeconds = route.estimatedApplicationLatencySeconds else {
+            return nil
+        }
+        let latencyMilliseconds = latencySeconds * 1_000
+        if route.isLowLatency,
+           latencySeconds
+            <= AsyncSRCBufferSizing.preferredApplicationLatencySeconds {
+            return String(
+                format: "App-added latency ≈ %.1f ms (target ≤ 5 ms)",
+                latencyMilliseconds
+            )
+        }
+        if route.isLowLatency {
+            return String(
+                format: "App-added latency ≈ %.1f ms (stable, max 10 ms)",
+                latencyMilliseconds
+            )
+        }
+        return String(
+            format: "Low-latency fallback — app-added latency ≈ %.1f ms",
+            latencyMilliseconds
+        )
     }
 }
