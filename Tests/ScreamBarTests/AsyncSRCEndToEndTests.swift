@@ -12,6 +12,8 @@ private let endToEndQualityMeasurementSeconds = 1.0
 private let endToEndMinimumSignalToNoiseRatioDecibels = 50.0
 private let endToEndMinimumGain = 0.90
 private let endToEndMaximumGain = 1.05
+private let endToEndPlaybackRateTelemetryDeadband = 0.000_001
+private let endToEndTelemetryPublishInterval = 64.0
 
 private struct EndToEndScenario {
     let inputSampleRate: Double
@@ -302,6 +304,17 @@ private final class AsyncSRCCallbackPipelineHarness {
                 status: kAudio_ParamError
             )
         }
+        ScreamBarAsyncSRCFlushMetrics(renderContext)
+        return try publishedMetrics()
+    }
+
+    func publishedMetrics() throws -> AsyncSRCMetrics {
+        guard let renderContext else {
+            throw EndToEndFailure(
+                operation: "Read end-to-end metrics",
+                status: kAudio_ParamError
+            )
+        }
         var rawMetrics = ScreamBarAsyncSRCMetrics()
         ScreamBarAsyncSRCCopyMetrics(renderContext, &rawMetrics)
         return AsyncSRCMetrics(rawMetrics)
@@ -537,7 +550,222 @@ private final class AsyncSRCCallbackPipelineHarness {
     }
 }
 
+private final class EndToEndBackgroundRenderOutcome: @unchecked Sendable {
+    var error: Error?
+}
+
 final class AsyncSRCEndToEndTests: XCTestCase {
+    func testPublishedTelemetrySnapshotsRemainCoherentDuringConcurrentReads() throws {
+        let harness = try AsyncSRCCallbackPipelineHarness.make()
+        defer { XCTAssertNoThrow(try harness.close()) }
+        let renderOutcome = EndToEndBackgroundRenderOutcome()
+        let renderGroup = DispatchGroup()
+        renderGroup.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { renderGroup.leave() }
+            do {
+                for _ in 0..<100 {
+                    _ = try harness.render(durationSeconds: 0.05)
+                    Thread.sleep(forTimeInterval: 0.001)
+                }
+            } catch {
+                renderOutcome.error = error
+            }
+        }
+
+        var previousSampleCount: UInt64 = 0
+        var previousFrameSum: UInt64 = 0
+        var previousAdjustmentCount: UInt64 = 0
+        var previousMinimumFill: UInt32?
+        var previousMaximumFill: UInt32?
+        var previousMinimumPlaybackRate: Double?
+        var previousMaximumPlaybackRate: Double?
+        var observedSnapshotCount = 0
+        while renderGroup.wait(timeout: .now() + .milliseconds(1)) == .timedOut {
+            let metrics = try harness.publishedMetrics()
+            XCTAssertGreaterThanOrEqual(
+                metrics.fifoFillSampleCount,
+                previousSampleCount
+            )
+            XCTAssertGreaterThanOrEqual(metrics.fifoFillFrameSum, previousFrameSum)
+            XCTAssertGreaterThanOrEqual(
+                metrics.playbackRateAdjustmentCount,
+                previousAdjustmentCount
+            )
+            if metrics.fifoFillSampleCount > 0 {
+                XCTAssertLessThanOrEqual(
+                    Double(metrics.minimumFIFOFillFrames),
+                    metrics.meanFIFOFillFrames
+                )
+                XCTAssertLessThanOrEqual(
+                    metrics.meanFIFOFillFrames,
+                    Double(metrics.maximumFIFOFillFrames)
+                )
+                XCTAssertEqual(
+                    metrics.minimumPlaybackRate == nil,
+                    metrics.maximumPlaybackRate == nil
+                )
+                if let minimumPlaybackRate = metrics.minimumPlaybackRate,
+                   let maximumPlaybackRate = metrics.maximumPlaybackRate {
+                    XCTAssertTrue(minimumPlaybackRate.isFinite)
+                    XCTAssertTrue(maximumPlaybackRate.isFinite)
+                    XCTAssertLessThanOrEqual(
+                        minimumPlaybackRate,
+                        maximumPlaybackRate
+                    )
+                    XCTAssertLessThanOrEqual(
+                        abs(minimumPlaybackRate - 1),
+                        AsyncSRCClockControlPolicy.maximumPlaybackRateDeviation
+                    )
+                    XCTAssertLessThanOrEqual(
+                        abs(maximumPlaybackRate - 1),
+                        AsyncSRCClockControlPolicy.maximumPlaybackRateDeviation
+                    )
+                    if let previousMinimumPlaybackRate {
+                        XCTAssertLessThanOrEqual(
+                            minimumPlaybackRate,
+                            previousMinimumPlaybackRate
+                        )
+                    }
+                    if let previousMaximumPlaybackRate {
+                        XCTAssertGreaterThanOrEqual(
+                            maximumPlaybackRate,
+                            previousMaximumPlaybackRate
+                        )
+                    }
+                    previousMinimumPlaybackRate = minimumPlaybackRate
+                    previousMaximumPlaybackRate = maximumPlaybackRate
+                }
+                if let previousMinimumFill {
+                    XCTAssertLessThanOrEqual(
+                        metrics.minimumFIFOFillFrames,
+                        previousMinimumFill
+                    )
+                }
+                if let previousMaximumFill {
+                    XCTAssertGreaterThanOrEqual(
+                        metrics.maximumFIFOFillFrames,
+                        previousMaximumFill
+                    )
+                }
+                previousMinimumFill = metrics.minimumFIFOFillFrames
+                previousMaximumFill = metrics.maximumFIFOFillFrames
+                observedSnapshotCount += 1
+            }
+            previousSampleCount = metrics.fifoFillSampleCount
+            previousFrameSum = metrics.fifoFillFrameSum
+            previousAdjustmentCount = metrics.playbackRateAdjustmentCount
+        }
+        if let renderError = renderOutcome.error {
+            throw renderError
+        }
+
+        XCTAssertGreaterThan(observedSnapshotCount, 0)
+        let finalMetrics = try harness.metrics()
+        XCTAssertGreaterThanOrEqual(
+            finalMetrics.fifoFillSampleCount,
+            previousSampleCount
+        )
+    }
+
+    func testTelemetryPublishesFullBatchesAndFlushesTheFinalPartialBatch() throws {
+        let harness = try AsyncSRCCallbackPipelineHarness.make()
+        defer { XCTAssertNoThrow(try harness.close()) }
+        let callbackPeriodSeconds = Double(endToEndDefaultScenario.quantum)
+            / endToEndDefaultScenario.outputSampleRate
+
+        _ = try harness.render(
+            durationSeconds: (endToEndTelemetryPublishInterval - 0.5)
+                * callbackPeriodSeconds
+        )
+        let fullBatchMetrics = try harness.publishedMetrics()
+        XCTAssertEqual(
+            fullBatchMetrics.fifoFillSampleCount,
+            UInt64(endToEndTelemetryPublishInterval)
+        )
+
+        _ = try harness.render(durationSeconds: callbackPeriodSeconds * 0.5)
+        XCTAssertEqual(
+            try harness.publishedMetrics().fifoFillSampleCount,
+            UInt64(endToEndTelemetryPublishInterval)
+        )
+        XCTAssertEqual(
+            try harness.metrics().fifoFillSampleCount,
+            UInt64(endToEndTelemetryPublishInterval) + 1
+        )
+    }
+
+    func testPlaybackRateAdjustmentTelemetryUsesDeadband() throws {
+        let harness = try AsyncSRCCallbackPipelineHarness.make()
+        defer { XCTAssertNoThrow(try harness.close()) }
+        let callbackDurationSeconds = Double(endToEndDefaultScenario.quantum)
+            / endToEndDefaultScenario.outputSampleRate * 0.5
+        var expectedAdjustmentCount: UInt64 = 0
+        var lastCountedPlaybackRate = 1.0
+        var observedSubDeadbandChange = false
+
+        for _ in 0..<256 {
+            _ = try harness.render(durationSeconds: callbackDurationSeconds)
+            let metrics = try harness.metrics()
+            guard metrics.minimumPlaybackRate != nil else { continue }
+            let delta = abs(metrics.playbackRate - lastCountedPlaybackRate)
+            if delta > endToEndPlaybackRateTelemetryDeadband {
+                lastCountedPlaybackRate = metrics.playbackRate
+                expectedAdjustmentCount += 1
+            } else if delta > 0 {
+                observedSubDeadbandChange = true
+            }
+            XCTAssertEqual(
+                metrics.playbackRateAdjustmentCount,
+                expectedAdjustmentCount
+            )
+        }
+
+        XCTAssertTrue(observedSubDeadbandChange)
+        XCTAssertGreaterThan(expectedAdjustmentCount, 0)
+    }
+
+    func testCallbackTelemetryTracksFIFOFillAndPlaybackRateAdjustments() throws {
+        let measurementDurationSeconds = 1.0
+        let harness = try AsyncSRCCallbackPipelineHarness.make()
+        defer { XCTAssertNoThrow(try harness.close()) }
+
+        _ = try harness.render(durationSeconds: measurementDurationSeconds)
+        let metrics = try harness.metrics()
+        let expectedOutputCallbackCount = UInt64(ceil(
+            measurementDurationSeconds
+                * endToEndDefaultScenario.outputSampleRate
+                / Double(endToEndDefaultScenario.quantum)
+        ))
+
+        XCTAssertEqual(metrics.fifoFillSampleCount, expectedOutputCallbackCount)
+        XCTAssertGreaterThan(metrics.fifoFillFrameSum, 0)
+        XCTAssertGreaterThanOrEqual(
+            metrics.meanFIFOFillFrames,
+            Double(metrics.minimumFIFOFillFrames)
+        )
+        XCTAssertLessThanOrEqual(
+            metrics.meanFIFOFillFrames,
+            Double(metrics.maximumFIFOFillFrames)
+        )
+        XCTAssertGreaterThan(metrics.maximumFIFOFillFrames, 0)
+        XCTAssertGreaterThan(metrics.playbackRateAdjustmentCount, 0)
+        let minimumPlaybackRate = try XCTUnwrap(metrics.minimumPlaybackRate)
+        let maximumPlaybackRate = try XCTUnwrap(metrics.maximumPlaybackRate)
+        XCTAssertLessThanOrEqual(
+            minimumPlaybackRate,
+            metrics.playbackRate
+        )
+        XCTAssertGreaterThanOrEqual(
+            maximumPlaybackRate,
+            metrics.playbackRate
+        )
+        XCTAssertLessThanOrEqual(minimumPlaybackRate, maximumPlaybackRate)
+        XCTAssertEqual(metrics.inputCallbackDeadlineMissCount, 0)
+        XCTAssertEqual(metrics.outputCallbackDeadlineMissCount, 0)
+        XCTAssertFalse(metrics.telemetrySaturated)
+    }
+
     func testCallbacksFIFOAndVarispeedPreserveContinuityMappingAndFidelity() throws {
         let harness = try AsyncSRCCallbackPipelineHarness.make()
         defer { XCTAssertNoThrow(try harness.close()) }
@@ -638,7 +866,7 @@ final class AsyncSRCEndToEndTests: XCTestCase {
         XCTAssertEqual(metrics.overflowCount, 0)
         XCTAssertEqual(metrics.resynchronizationCount, 0)
         XCTAssertEqual(metrics.droppedInputFrames, 0)
-        XCTAssertFalse(metrics.hasRuntimeErrors)
+        XCTAssertFalse(metrics.hasRuntimeErrors, "\(metrics)")
     }
 
     private func assertConversionQuality(scenario: EndToEndScenario) throws {

@@ -53,6 +53,11 @@ struct AsyncSRCAudioUnitOperations {
     let clearCallback: (AudioUnit, AsyncSRCCallbackRole) -> OSStatus
     let uninitialize: (AudioUnit, AsyncSRCAudioUnitRole) -> OSStatus
     let dispose: (AudioUnit, AsyncSRCAudioUnitRole) -> OSStatus
+    let flushRenderMetrics: (OpaquePointer) -> Void
+    let copyRenderMetrics: (
+        OpaquePointer,
+        UnsafeMutablePointer<ScreamBarAsyncSRCMetrics>
+    ) -> Void
     let destroyRenderContext: (OpaquePointer) -> Void
 
     static let live = AsyncSRCAudioUnitOperations(
@@ -95,6 +100,8 @@ struct AsyncSRCAudioUnitOperations {
         },
         uninitialize: { audioUnit, _ in AudioUnitUninitialize(audioUnit) },
         dispose: { audioUnit, _ in AudioComponentInstanceDispose(audioUnit) },
+        flushRenderMetrics: ScreamBarAsyncSRCFlushMetrics,
+        copyRenderMetrics: ScreamBarAsyncSRCCopyMetrics,
         destroyRenderContext: ScreamBarAsyncSRCContextDestroy
     )
 }
@@ -121,6 +128,9 @@ struct AsyncSRCMetrics: Equatable, Sendable {
     let rateParameterErrorCount: UInt64
     let inputCallbackDeadlineMissCount: UInt64
     let outputCallbackDeadlineMissCount: UInt64
+    let fifoFillSampleCount: UInt64
+    let fifoFillFrameSum: UInt64
+    let playbackRateAdjustmentCount: UInt64
     let latencyCeilingOverflowCount: UInt64
     let inputCallbackFrameLimitExceededCount: UInt64
     let outputCallbackFrameLimitExceededCount: UInt64
@@ -136,12 +146,17 @@ struct AsyncSRCMetrics: Equatable, Sendable {
     let lastSourceReadableFrames: UInt32
     let underrunSourceRequestedFrames: UInt32
     let underrunSourceReadableFrames: UInt32
+    let minimumFIFOFillFrames: UInt32
+    let maximumFIFOFillFrames: UInt32
     let maximumInputCallbackGapNanoseconds: UInt64
     let maximumOutputCallbackGapNanoseconds: UInt64
     let maximumInputCallbackExecutionNanoseconds: UInt64
     let maximumOutputCallbackExecutionNanoseconds: UInt64
     let playbackRate: Double
+    let minimumPlaybackRate: Double?
+    let maximumPlaybackRate: Double?
     let maximumPlaybackRateDeviation: Double
+    let telemetrySaturated: Bool
     let lastInputStatus: OSStatus
     let lastOutputStatus: OSStatus
 
@@ -151,6 +166,7 @@ struct AsyncSRCMetrics: Equatable, Sendable {
             || rateParameterErrorCount > 0
             || inputCallbackDeadlineMissCount > 0
             || outputCallbackDeadlineMissCount > 0
+            || telemetrySaturated
             || latencyCeilingOverflowCount > 0
             || inputCallbackFrameLimitExceededCount > 0
             || outputCallbackFrameLimitExceededCount > 0
@@ -159,6 +175,11 @@ struct AsyncSRCMetrics: Equatable, Sendable {
     var hasMissedCallbackDeadline: Bool {
         inputCallbackDeadlineMissCount > 0
             || outputCallbackDeadlineMissCount > 0
+    }
+
+    var meanFIFOFillFrames: Double {
+        guard fifoFillSampleCount > 0 else { return 0 }
+        return Double(fifoFillFrameSum) / Double(fifoFillSampleCount)
     }
 
     init(_ metrics: ScreamBarAsyncSRCMetrics) {
@@ -180,6 +201,9 @@ struct AsyncSRCMetrics: Equatable, Sendable {
             metrics.input_callback_deadline_miss_count
         outputCallbackDeadlineMissCount =
             metrics.output_callback_deadline_miss_count
+        fifoFillSampleCount = metrics.fifo_fill_sample_count
+        fifoFillFrameSum = metrics.fifo_fill_frame_sum
+        playbackRateAdjustmentCount = metrics.playback_rate_adjustment_count
         latencyCeilingOverflowCount = metrics.latency_ceiling_overflow_count
         inputCallbackFrameLimitExceededCount =
             metrics.input_callback_frame_limit_exceeded_count
@@ -198,6 +222,8 @@ struct AsyncSRCMetrics: Equatable, Sendable {
         lastSourceReadableFrames = metrics.last_source_readable_frames
         underrunSourceRequestedFrames = metrics.underrun_source_requested_frames
         underrunSourceReadableFrames = metrics.underrun_source_readable_frames
+        minimumFIFOFillFrames = metrics.minimum_fifo_fill_frames
+        maximumFIFOFillFrames = metrics.maximum_fifo_fill_frames
         maximumInputCallbackGapNanoseconds = AudioConvertHostTimeToNanos(
             metrics.maximum_input_callback_host_time_gap
         )
@@ -211,7 +237,14 @@ struct AsyncSRCMetrics: Equatable, Sendable {
             metrics.maximum_output_callback_execution_host_time
         )
         playbackRate = metrics.playback_rate
+        minimumPlaybackRate = metrics.minimum_playback_rate > 0
+            ? metrics.minimum_playback_rate
+            : nil
+        maximumPlaybackRate = metrics.maximum_playback_rate > 0
+            ? metrics.maximum_playback_rate
+            : nil
         maximumPlaybackRateDeviation = metrics.maximum_playback_rate_deviation
+        telemetrySaturated = metrics.telemetry_saturated
         lastInputStatus = metrics.last_input_status
         lastOutputStatus = metrics.last_output_status
     }
@@ -238,6 +271,7 @@ final class AsyncSRCPlaythrough: CoreAudioRouteTransport {
     private var inputCallbackInstalled = false
     private var outputCallbackInstalled = false
     private var sourceCallbackInstalled = false
+    private var finalMetrics: AsyncSRCMetrics?
     private(set) var converterLatencySeconds: Double = 0
     private(set) var estimatedApplicationLatencySeconds: Double = 0
     private(set) var maximumApplicationLatencySeconds: Double = 0
@@ -294,9 +328,9 @@ final class AsyncSRCPlaythrough: CoreAudioRouteTransport {
     }
 
     var metrics: AsyncSRCMetrics? {
-        guard let renderContext else { return nil }
+        guard let renderContext else { return finalMetrics }
         var rawMetrics = ScreamBarAsyncSRCMetrics()
-        ScreamBarAsyncSRCCopyMetrics(renderContext, &rawMetrics)
+        audioUnitOperations.copyRenderMetrics(renderContext, &rawMetrics)
         return AsyncSRCMetrics(rawMetrics)
     }
 
@@ -509,6 +543,12 @@ final class AsyncSRCPlaythrough: CoreAudioRouteTransport {
                     teardownFailure(stage: "stopping output AUHAL", status: status)
                 )
             }
+        }
+        if !outputStarted, let renderContext {
+            audioUnitOperations.flushRenderMetrics(renderContext)
+            var rawMetrics = ScreamBarAsyncSRCMetrics()
+            audioUnitOperations.copyRenderMetrics(renderContext, &rawMetrics)
+            finalMetrics = AsyncSRCMetrics(rawMetrics)
         }
 
         failures.append(contentsOf: clearCallbacksForStoppedAudioUnits())

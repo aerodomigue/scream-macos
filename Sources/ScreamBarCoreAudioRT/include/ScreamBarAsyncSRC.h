@@ -37,6 +37,10 @@ typedef struct {
     uint64_t rate_parameter_error_count;
     uint64_t input_callback_deadline_miss_count;
     uint64_t output_callback_deadline_miss_count;
+    /* FIFO fill samples include priming but exclude rejected callbacks. */
+    uint64_t fifo_fill_sample_count;
+    uint64_t fifo_fill_frame_sum;
+    uint64_t playback_rate_adjustment_count;
     uint64_t latency_ceiling_overflow_count;
     uint64_t input_callback_frame_limit_exceeded_count;
     uint64_t output_callback_frame_limit_exceeded_count;
@@ -52,12 +56,18 @@ typedef struct {
     uint32_t last_source_readable_frames;
     uint32_t underrun_source_requested_frames;
     uint32_t underrun_source_readable_frames;
+    uint32_t minimum_fifo_fill_frames;
+    uint32_t maximum_fifo_fill_frames;
     uint64_t maximum_input_callback_host_time_gap;
     uint64_t maximum_output_callback_host_time_gap;
     uint64_t maximum_input_callback_execution_host_time;
     uint64_t maximum_output_callback_execution_host_time;
     double playback_rate;
+    /* Zero means that no playback rate has been successfully applied yet. */
+    double minimum_playback_rate;
+    double maximum_playback_rate;
     double maximum_playback_rate_deviation;
+    bool telemetry_saturated;
     OSStatus last_input_status;
     OSStatus last_output_status;
 } ScreamBarAsyncSRCMetrics;
@@ -139,6 +149,14 @@ void ScreamBarAsyncSRCContextDestroy(
 void ScreamBarAsyncSRCCopyMetrics(
     const ScreamBarAsyncSRCContext * _Nonnull context,
     ScreamBarAsyncSRCMetrics * _Nonnull metrics
+);
+
+/*
+ * Publishes the final partial telemetry batch. Calling this before the output
+ * AudioUnit has stopped violates the single-writer precondition.
+ */
+void ScreamBarAsyncSRCFlushMetrics(
+    ScreamBarAsyncSRCContext * _Nonnull context
 );
 
 OSStatus ScreamBarAsyncSRCInputCallback(

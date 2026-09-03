@@ -116,6 +116,7 @@ struct AggregateSubdeviceState: Equatable {
 @MainActor
 final class LegacyCoreAudioBackend: CoreAudioBackend {
     var onHardwareChanged: (() -> Void)?
+    var onAsyncSRCMetricsFinalized: ((UUID, AsyncSRCMetrics) -> Void)?
 
     private struct ListenerRegistration {
         let objectID: AudioObjectID
@@ -129,6 +130,7 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         var bufferFrameSizeRestores: [BufferFrameSizeRestore]
         var expectedInputCallbackFrames: UInt32?
         var expectedOutputCallbackFrames: UInt32?
+        var didPublishFinalAsyncSRCMetrics = false
 
         init(
             aggregateDeviceID: AudioDeviceID? = nil,
@@ -516,7 +518,7 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
 
     func stopAndDestroyRoute(sessionID: UUID) -> [String] {
         guard let resources = routes[sessionID] else { return [] }
-        let failures = cleanup(resources: resources)
+        let failures = cleanup(resources: resources, sessionID: sessionID)
         if !resources.hasLiveCoreAudioResources {
             routes.removeValue(forKey: sessionID)
         }
@@ -667,12 +669,23 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         return failures
     }
 
-    private func cleanup(resources: RouteResources) -> [String] {
+    private func cleanup(
+        resources: RouteResources,
+        sessionID: UUID? = nil
+    ) -> [String] {
         var failures: [String] = []
 
         if let playthrough = resources.playthrough {
             failures.append(contentsOf: playthrough.stopAndDispose())
             guard playthrough.isFullyDisposed else { return failures }
+            if let sessionID,
+               !resources.didPublishFinalAsyncSRCMetrics,
+               let convertedPlaythrough = playthrough as? AsyncSRCPlaythrough,
+               let finalMetrics = convertedPlaythrough.metrics,
+               let onAsyncSRCMetricsFinalized {
+                onAsyncSRCMetricsFinalized(sessionID, finalMetrics)
+                resources.didPublishFinalAsyncSRCMetrics = true
+            }
             resources.playthrough = nil
         }
 

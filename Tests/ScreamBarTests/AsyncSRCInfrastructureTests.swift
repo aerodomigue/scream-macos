@@ -59,6 +59,44 @@ final class AsyncSRCInfrastructureTests: XCTestCase {
         TimingScenario(inputSampleRate: 192_000, outputSampleRate: 48_000),
     ]
 
+    func testEmptyCallbackTelemetryHasDeterministicBaseline() throws {
+        let placeholderAudioUnit = try XCTUnwrap(AudioUnit(bitPattern: 1))
+        let context = try XCTUnwrap(
+            ScreamBarAsyncSRCContextCreate(
+                placeholderAudioUnit,
+                placeholderAudioUnit,
+                1,
+                1,
+                128,
+                128,
+                1_024,
+                256,
+                480,
+                608,
+                48_000,
+                44_100,
+                true,
+                true
+            )
+        )
+        defer { ScreamBarAsyncSRCContextDestroy(context) }
+
+        var rawMetrics = ScreamBarAsyncSRCMetrics()
+        ScreamBarAsyncSRCCopyMetrics(context, &rawMetrics)
+        let metrics = AsyncSRCMetrics(rawMetrics)
+
+        XCTAssertEqual(metrics.fifoFillSampleCount, 0)
+        XCTAssertEqual(metrics.fifoFillFrameSum, 0)
+        XCTAssertEqual(metrics.minimumFIFOFillFrames, 0)
+        XCTAssertEqual(metrics.maximumFIFOFillFrames, 0)
+        XCTAssertEqual(metrics.meanFIFOFillFrames, 0)
+        XCTAssertEqual(metrics.playbackRateAdjustmentCount, 0)
+        XCTAssertEqual(metrics.playbackRate, 1)
+        XCTAssertNil(metrics.minimumPlaybackRate)
+        XCTAssertNil(metrics.maximumPlaybackRate)
+        XCTAssertFalse(metrics.telemetrySaturated)
+    }
+
     func testRingBufferRejectsInvalidCapacity() {
         XCTAssertNil(ScreamBarSPSCRingBufferCreate(2, 0))
         XCTAssertNil(ScreamBarSPSCRingBufferCreate(2, 3))

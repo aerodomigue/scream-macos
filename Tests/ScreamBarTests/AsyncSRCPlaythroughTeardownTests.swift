@@ -1,5 +1,6 @@
 @testable import ScreamBar
 import AudioToolbox
+import ScreamBarCoreAudioRT
 import XCTest
 
 final class AsyncSRCPlaythroughTeardownTests: XCTestCase {
@@ -114,12 +115,37 @@ final class AsyncSRCPlaythroughTeardownTests: XCTestCase {
         XCTAssertFalse(operations.events.contains("dispose output AUHAL"))
         XCTAssertFalse(playthrough.isFullyDisposed)
         XCTAssertEqual(operations.destroyContextCount, 0)
+        XCTAssertEqual(operations.count("flush metrics"), 0)
 
         XCTAssertTrue(playthrough.stopAndDispose().isEmpty)
         XCTAssertTrue(playthrough.isFullyDisposed)
         XCTAssertEqual(operations.count("stop input AUHAL"), 1)
         XCTAssertEqual(operations.count("dispose input AUHAL"), 1)
         XCTAssertEqual(operations.destroyContextCount, 1)
+        XCTAssertEqual(operations.count("flush metrics"), 1)
+    }
+
+    func testFinalMetricsAreFlushedOnlyAfterOutputStops() {
+        let operations = AsyncSRCAudioUnitOperationsSpy()
+        let playthrough = makePlaythrough(operations: operations)
+
+        XCTAssertTrue(playthrough.stopAndDispose().isEmpty)
+
+        let outputStopIndex = operations.events.firstIndex(
+            of: "stop output AUHAL"
+        )
+        let flushIndex = operations.events.firstIndex(of: "flush metrics")
+        let contextDestructionIndex = operations.events.firstIndex(
+            of: "destroy context"
+        )
+        XCTAssertNotNil(outputStopIndex)
+        XCTAssertNotNil(flushIndex)
+        XCTAssertNotNil(contextDestructionIndex)
+        if let outputStopIndex, let flushIndex, let contextDestructionIndex {
+            XCTAssertLessThan(outputStopIndex, flushIndex)
+            XCTAssertLessThan(flushIndex, contextDestructionIndex)
+        }
+        XCTAssertNotNil(playthrough.metrics)
     }
 
     func testUninitializeFailuresDoNotPreventIndependentDisposal() {
@@ -430,6 +456,13 @@ private final class AsyncSRCAudioUnitOperationsSpy {
             },
             dispose: { [weak self] _, role in
                 self?.status(for: .dispose, role: role) ?? kAudio_ParamError
+            },
+            flushRenderMetrics: { [weak self] _ in
+                self?.events.append("flush metrics")
+            },
+            copyRenderMetrics: { [weak self] _, metrics in
+                metrics.pointee = ScreamBarAsyncSRCMetrics()
+                self?.events.append("copy metrics")
             },
             destroyRenderContext: { [weak self] _ in
                 self?.destroyContextCount += 1

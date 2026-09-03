@@ -35,6 +35,7 @@ static const double SCREAM_BAR_STABLE_SECONDS_BEFORE_TARGET_REDUCTION = 60.0;
 static const uint32_t SCREAM_BAR_SOURCE_FRAME_MARGIN = 64;
 static const uint32_t SCREAM_BAR_LOW_WATER_GUARD_DIVISOR = 4;
 static const uint32_t SCREAM_BAR_TARGET_GROWTH_DIVISOR = 2;
+static const uint32_t SCREAM_BAR_TELEMETRY_PUBLISH_INTERVAL = 64;
 
 struct ScreamBarAsyncSRCClockController {
     double averaged_fill_error_frames;
@@ -74,6 +75,17 @@ struct ScreamBarAsyncSRCContext {
     bool low_latency;
     bool adaptive_clock_control;
     uint64_t stable_output_frames;
+    uint64_t fifo_fill_sample_count;
+    uint64_t fifo_fill_frame_sum;
+    uint64_t playback_rate_adjustment_count;
+    uint32_t minimum_fifo_fill_frames;
+    uint32_t maximum_fifo_fill_frames;
+    double minimum_playback_rate;
+    double maximum_playback_rate;
+    double last_applied_playback_rate;
+    uint32_t telemetry_callbacks_until_publish;
+    bool has_applied_playback_rate;
+    bool telemetry_saturated;
     _Atomic bool primed;
     _Atomic uint_fast64_t captured_frames;
     _Atomic uint_fast64_t rendered_frames;
@@ -90,6 +102,11 @@ struct ScreamBarAsyncSRCContext {
     _Atomic uint_fast64_t rate_parameter_error_count;
     _Atomic uint_fast64_t input_callback_deadline_miss_count;
     _Atomic uint_fast64_t output_callback_deadline_miss_count;
+    _Atomic uint_fast64_t published_fifo_fill_sample_count;
+    _Atomic uint_fast64_t published_fifo_fill_frame_sum;
+    _Atomic uint_fast64_t published_playback_rate_adjustment_count;
+    _Atomic uint_fast64_t published_telemetry_generation;
+    _Atomic bool published_telemetry_saturated;
     _Atomic uint_fast64_t latency_ceiling_overflow_count;
     _Atomic uint_fast64_t input_callback_frame_limit_exceeded_count;
     _Atomic uint_fast64_t output_callback_frame_limit_exceeded_count;
@@ -103,6 +120,8 @@ struct ScreamBarAsyncSRCContext {
     _Atomic uint_fast32_t last_source_readable_frames;
     _Atomic uint_fast32_t underrun_source_requested_frames;
     _Atomic uint_fast32_t underrun_source_readable_frames;
+    _Atomic uint_fast32_t published_minimum_fifo_fill_frames;
+    _Atomic uint_fast32_t published_maximum_fifo_fill_frames;
     _Atomic uint_fast64_t last_input_callback_host_time;
     _Atomic uint_fast64_t maximum_input_callback_host_time_gap;
     _Atomic uint_fast64_t last_output_callback_host_time;
@@ -110,6 +129,8 @@ struct ScreamBarAsyncSRCContext {
     _Atomic uint_fast64_t maximum_input_callback_execution_host_time;
     _Atomic uint_fast64_t maximum_output_callback_execution_host_time;
     _Atomic uint_fast64_t playback_rate_bits;
+    _Atomic uint_fast64_t minimum_playback_rate_bits;
+    _Atomic uint_fast64_t maximum_playback_rate_bits;
     _Atomic uint_fast64_t maximum_playback_rate_deviation_bits;
     _Atomic int_fast32_t last_input_status;
     _Atomic int_fast32_t last_output_status;
@@ -148,6 +169,197 @@ static void ScreamBarStoreMaximumDouble(
                 memory_order_relaxed,
                 memory_order_relaxed
             )) {
+            return;
+        }
+    }
+}
+
+/*
+ * Output-callback telemetry has a single writer. Accumulation is plain local
+ * storage; one versioned atomic snapshot is published every 64 callbacks.
+ */
+static void ScreamBarPublishTelemetry(ScreamBarAsyncSRCContext *context) {
+    atomic_fetch_add_explicit(
+        &context->published_telemetry_generation,
+        1,
+        memory_order_acq_rel
+    );
+    atomic_store_explicit(
+        &context->published_fifo_fill_sample_count,
+        context->fifo_fill_sample_count,
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &context->published_fifo_fill_frame_sum,
+        context->fifo_fill_frame_sum,
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &context->published_playback_rate_adjustment_count,
+        context->playback_rate_adjustment_count,
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &context->published_minimum_fifo_fill_frames,
+        context->minimum_fifo_fill_frames == UINT32_MAX
+            ? 0
+            : context->minimum_fifo_fill_frames,
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &context->published_maximum_fifo_fill_frames,
+        context->maximum_fifo_fill_frames,
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &context->minimum_playback_rate_bits,
+        ScreamBarDoubleBits(
+            context->has_applied_playback_rate
+                ? context->minimum_playback_rate
+                : 0
+        ),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &context->maximum_playback_rate_bits,
+        ScreamBarDoubleBits(
+            context->has_applied_playback_rate
+                ? context->maximum_playback_rate
+                : 0
+        ),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &context->published_telemetry_saturated,
+        context->telemetry_saturated,
+        memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &context->published_telemetry_generation,
+        1,
+        memory_order_release
+    );
+}
+
+static void ScreamBarRecordFIFOFill(
+    ScreamBarAsyncSRCContext *context,
+    uint32_t readable_frames
+) {
+    if (context->fifo_fill_sample_count < UINT64_MAX
+        && context->fifo_fill_frame_sum
+            <= UINT64_MAX - (uint64_t)readable_frames) {
+        context->fifo_fill_sample_count += 1;
+        context->fifo_fill_frame_sum += readable_frames;
+    } else {
+        context->telemetry_saturated = true;
+    }
+    if (readable_frames < context->minimum_fifo_fill_frames) {
+        context->minimum_fifo_fill_frames = readable_frames;
+    }
+    if (readable_frames > context->maximum_fifo_fill_frames) {
+        context->maximum_fifo_fill_frames = readable_frames;
+    }
+}
+
+static void ScreamBarRecordPlaybackRate(
+    ScreamBarAsyncSRCContext *context,
+    double playback_rate
+) {
+    if (fabs(playback_rate - context->last_applied_playback_rate)
+            > SCREAM_BAR_PLAYBACK_RATE_DEADBAND) {
+        context->last_applied_playback_rate = playback_rate;
+        if (context->playback_rate_adjustment_count < UINT64_MAX) {
+            context->playback_rate_adjustment_count += 1;
+        } else {
+            context->telemetry_saturated = true;
+        }
+    }
+    if (!context->has_applied_playback_rate) {
+        context->minimum_playback_rate = playback_rate;
+        context->maximum_playback_rate = playback_rate;
+        context->has_applied_playback_rate = true;
+    } else if (playback_rate < context->minimum_playback_rate) {
+        context->minimum_playback_rate = playback_rate;
+    } else if (playback_rate > context->maximum_playback_rate) {
+        context->maximum_playback_rate = playback_rate;
+    }
+}
+
+static void ScreamBarCompleteOutputTelemetry(
+    ScreamBarAsyncSRCContext *context
+) {
+    if (context->telemetry_callbacks_until_publish > 1) {
+        context->telemetry_callbacks_until_publish -= 1;
+        return;
+    }
+    ScreamBarPublishTelemetry(context);
+    context->telemetry_callbacks_until_publish =
+        SCREAM_BAR_TELEMETRY_PUBLISH_INTERVAL;
+}
+
+static void ScreamBarCopyPublishedTelemetry(
+    const ScreamBarAsyncSRCContext *context,
+    ScreamBarAsyncSRCMetrics *metrics
+) {
+    for (;;) {
+        const uint_fast64_t generation_before = atomic_load_explicit(
+            &context->published_telemetry_generation,
+            memory_order_acquire
+        );
+        if ((generation_before & 1U) != 0) {
+            continue;
+        }
+        const uint64_t fifo_fill_sample_count = atomic_load_explicit(
+            &context->published_fifo_fill_sample_count,
+            memory_order_relaxed
+        );
+        const uint64_t fifo_fill_frame_sum = atomic_load_explicit(
+            &context->published_fifo_fill_frame_sum,
+            memory_order_relaxed
+        );
+        const uint64_t playback_rate_adjustment_count = atomic_load_explicit(
+            &context->published_playback_rate_adjustment_count,
+            memory_order_relaxed
+        );
+        const uint32_t minimum_fifo_fill_frames = (uint32_t)atomic_load_explicit(
+            &context->published_minimum_fifo_fill_frames,
+            memory_order_relaxed
+        );
+        const uint32_t maximum_fifo_fill_frames = (uint32_t)atomic_load_explicit(
+            &context->published_maximum_fifo_fill_frames,
+            memory_order_relaxed
+        );
+        const double minimum_playback_rate = ScreamBarDoubleFromBits(
+            atomic_load_explicit(
+                &context->minimum_playback_rate_bits,
+                memory_order_relaxed
+            )
+        );
+        const double maximum_playback_rate = ScreamBarDoubleFromBits(
+            atomic_load_explicit(
+                &context->maximum_playback_rate_bits,
+                memory_order_relaxed
+            )
+        );
+        const bool telemetry_saturated = atomic_load_explicit(
+            &context->published_telemetry_saturated,
+            memory_order_relaxed
+        );
+        atomic_thread_fence(memory_order_acquire);
+        const uint_fast64_t generation_after = atomic_load_explicit(
+            &context->published_telemetry_generation,
+            memory_order_relaxed
+        );
+        if (generation_before == generation_after) {
+            metrics->fifo_fill_sample_count = fifo_fill_sample_count;
+            metrics->fifo_fill_frame_sum = fifo_fill_frame_sum;
+            metrics->playback_rate_adjustment_count =
+                playback_rate_adjustment_count;
+            metrics->minimum_fifo_fill_frames = minimum_fifo_fill_frames;
+            metrics->maximum_fifo_fill_frames = maximum_fifo_fill_frames;
+            metrics->minimum_playback_rate = minimum_playback_rate;
+            metrics->maximum_playback_rate = maximum_playback_rate;
+            metrics->telemetry_saturated = telemetry_saturated;
             return;
         }
     }
@@ -523,6 +735,10 @@ static ScreamBarAsyncSRCContext *ScreamBarAsyncSRCContextCreateInternal(
         host_clock_frequency / output_sample_rate;
     context->low_latency = low_latency;
     context->adaptive_clock_control = adaptive_clock_control;
+    context->minimum_fifo_fill_frames = UINT32_MAX;
+    context->last_applied_playback_rate = 1.0;
+    context->telemetry_callbacks_until_publish =
+        SCREAM_BAR_TELEMETRY_PUBLISH_INTERVAL;
 
     context->maximum_source_frames = ScreamBarAsyncSRCMaximumSourceFrames(
         maximum_output_frames,
@@ -596,6 +812,11 @@ static ScreamBarAsyncSRCContext *ScreamBarAsyncSRCContextCreateInternal(
     atomic_init(&context->rate_parameter_error_count, 0);
     atomic_init(&context->input_callback_deadline_miss_count, 0);
     atomic_init(&context->output_callback_deadline_miss_count, 0);
+    atomic_init(&context->published_fifo_fill_sample_count, 0);
+    atomic_init(&context->published_fifo_fill_frame_sum, 0);
+    atomic_init(&context->published_playback_rate_adjustment_count, 0);
+    atomic_init(&context->published_telemetry_generation, 0);
+    atomic_init(&context->published_telemetry_saturated, false);
     atomic_init(&context->latency_ceiling_overflow_count, 0);
     atomic_init(&context->input_callback_frame_limit_exceeded_count, 0);
     atomic_init(&context->output_callback_frame_limit_exceeded_count, 0);
@@ -609,6 +830,8 @@ static ScreamBarAsyncSRCContext *ScreamBarAsyncSRCContextCreateInternal(
     atomic_init(&context->last_source_readable_frames, 0);
     atomic_init(&context->underrun_source_requested_frames, 0);
     atomic_init(&context->underrun_source_readable_frames, 0);
+    atomic_init(&context->published_minimum_fifo_fill_frames, 0);
+    atomic_init(&context->published_maximum_fifo_fill_frames, 0);
     atomic_init(&context->last_input_callback_host_time, 0);
     atomic_init(&context->maximum_input_callback_host_time_gap, 0);
     atomic_init(&context->last_output_callback_host_time, 0);
@@ -616,6 +839,14 @@ static ScreamBarAsyncSRCContext *ScreamBarAsyncSRCContextCreateInternal(
     atomic_init(&context->maximum_input_callback_execution_host_time, 0);
     atomic_init(&context->maximum_output_callback_execution_host_time, 0);
     atomic_init(&context->playback_rate_bits, ScreamBarDoubleBits(1.0));
+    atomic_init(
+        &context->minimum_playback_rate_bits,
+        ScreamBarDoubleBits(0)
+    );
+    atomic_init(
+        &context->maximum_playback_rate_bits,
+        ScreamBarDoubleBits(0)
+    );
     atomic_init(
         &context->maximum_playback_rate_deviation_bits,
         ScreamBarDoubleBits(0)
@@ -715,6 +946,12 @@ void ScreamBarAsyncSRCContextDestroy(ScreamBarAsyncSRCContext *context) {
     free(context);
 }
 
+void ScreamBarAsyncSRCFlushMetrics(ScreamBarAsyncSRCContext *context) {
+    if (context != NULL) {
+        ScreamBarPublishTelemetry(context);
+    }
+}
+
 void ScreamBarAsyncSRCCopyMetrics(
     const ScreamBarAsyncSRCContext *context,
     ScreamBarAsyncSRCMetrics *metrics
@@ -782,6 +1019,7 @@ void ScreamBarAsyncSRCCopyMetrics(
         &context->output_callback_deadline_miss_count,
         memory_order_relaxed
     );
+    ScreamBarCopyPublishedTelemetry(context, metrics);
     metrics->latency_ceiling_overflow_count = atomic_load_explicit(
         &context->latency_ceiling_overflow_count,
         memory_order_relaxed
@@ -1171,6 +1409,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
     uint32_t readable_frames = ScreamBarSPSCRingBufferReadableFrames(
         context->ring_buffer
     );
+    ScreamBarRecordFIFOFill(context, readable_frames);
     uint32_t target_fill_frames = (uint32_t)atomic_load_explicit(
         &context->target_fill_frames,
         memory_order_relaxed
@@ -1226,6 +1465,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
                 frame_count,
                 memory_order_relaxed
             );
+            ScreamBarCompleteOutputTelemetry(context);
             ScreamBarRecordCallbackExecutionTime(
                 callback_start_host_time,
                 frame_count,
@@ -1299,6 +1539,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
             memory_order_relaxed
         );
         ScreamBarMarkOutputSilent(action_flags, output_data, frame_count);
+        ScreamBarCompleteOutputTelemetry(context);
         ScreamBarRecordCallbackExecutionTime(
             callback_start_host_time,
             frame_count,
@@ -1313,6 +1554,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
         ScreamBarDoubleBits(playback_rate),
         memory_order_relaxed
     );
+    ScreamBarRecordPlaybackRate(context, playback_rate);
     ScreamBarStoreMaximumDouble(
         &context->maximum_playback_rate_deviation_bits,
         fabs(playback_rate - 1.0)
@@ -1355,6 +1597,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
             memory_order_relaxed
         );
         ScreamBarMarkOutputSilent(action_flags, output_data, frame_count);
+        ScreamBarCompleteOutputTelemetry(context);
         ScreamBarRecordCallbackExecutionTime(
             callback_start_host_time,
             frame_count,
@@ -1376,6 +1619,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
     );
     if (underruns_after != underruns_before) {
         ScreamBarMarkOutputSilent(action_flags, output_data, frame_count);
+        ScreamBarCompleteOutputTelemetry(context);
         ScreamBarRecordCallbackExecutionTime(
             callback_start_host_time,
             frame_count,
@@ -1407,6 +1651,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
         );
         context->stable_output_frames = 0;
     }
+    ScreamBarCompleteOutputTelemetry(context);
     ScreamBarRecordCallbackExecutionTime(
         callback_start_host_time,
         frame_count,

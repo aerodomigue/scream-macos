@@ -198,6 +198,32 @@ Use `60`, `300`, `900`, `1800`, or `3600` seconds for the standard 1, 5, 15, 30,
 
 The regular suite covers rate planning, independent-clock drift up to ±1000 ppm, jitter and burst simulation, lock-free buffer behavior, pitch/gain/SNR, IO topology, callback deadlines, and stream-format contracts. The hardware suites cover both playthrough paths, the complete Direct Routing service lifecycle, cleanup, explicit buffer application and restoration, preservation of the default output and Hog Mode state, and concurrent use by a normal macOS audio client. A hardware-dependent test is skipped when the requested devices or capabilities are unavailable.
 
+The final one-hour CoreAudio matrix is separately opt-in. It covers a stable
+converted route, prolonged silence followed by audio resume, high CPU load,
+System Default output changes, Cubilux disconnect/reconnect, and a
+48 kHz → other state → 48 kHz cycle. The last four require an operator; run all
+hardware scenarios sequentially after quitting ScreamBar.
+
+```bash
+SCREAMBAR_RUN_COREAUDIO_LONG_SOAK_TESTS=1 \
+SCREAMBAR_ASYNC_SRC_INPUT_NAME="Cubilux SPDIF Receiver" \
+SCREAMBAR_ASYNC_SRC_OUTPUT_NAME="Bose QC 45" \
+SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=3600 \
+  swift test --filter testOneHourNormalConvertedRoute
+```
+
+Each run writes a JSON report under `.build/coreaudio-soak-reports` with
+aggregate FIFO fill, SRC ratio, observed latency, configured latency ceiling,
+callback gap/execution time, rebuild, error, underrun/overrun, and
+execution-deadline telemetry. Intentional interruption scenarios classify
+earlier-session health events separately and require the recovered final
+session to be clean. The callback accumulates the new statistics without
+locks, allocations, or logging and publishes one coherent atomic snapshot
+every 64 output callbacks. See
+[Direct Routing architecture](docs/direct-routing.md#one-hour-scenario-matrix)
+for every command, operator instruction, environment override, metric
+definition, and real-time telemetry constraint.
+
 ## Troubleshooting
 
 ### Audio-input permission is denied

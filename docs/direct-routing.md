@@ -245,6 +245,33 @@ and maximum target/readable frames, callback sizes and gaps, maximum callback
 execution times, current/maximum playback-rate deviation, source request sizes,
 and last input/output OSStatus.
 
+The long-run fields are collected without putting reporting work in the audio
+thread:
+
+- FIFO fill is sampled at entry to every valid output callback, including the
+  priming period. Rejected callbacks are excluded.
+- FIFO sample count/sum/min/max and SRC ratio adjustment count/min/max are
+  accumulated in plain single-writer fields owned by the output callback.
+- A coherent C11 seqlock snapshot is published every 64 output callbacks. One
+  batch uses two generation updates and eight relaxed payload stores, averaging
+  about 0.156 atomic operations per callback.
+- A ratio adjustment means a change greater than the controller's `1e-6`
+  deadband; repeated writes of the same effective value are not counted.
+- The new batched FIFO and ratio accumulators saturate instead of wrapping and
+  expose `telemetrySaturated` if a session exceeds their representable range.
+- The final partial batch is flushed only after the output AUHAL has confirmed
+  it is stopped. The backend forwards that final snapshot before removing the
+  route, so a rebuild cannot hide the previous session's last counters.
+- Observed estimated-latency min/max, the configured latency ceiling, and
+  routing state/rebuild counts are sampled and aggregated on the non-real-time
+  test thread.
+
+No allocation, lock, log, ARC operation, or sequentially consistent atomic was
+added to either audio callback. CoreAudio does not expose a reliable native
+xrun counter for this topology, so reports keep underruns, overruns,
+latency-ceiling overruns, resynchronizations, dropped frames, and callback
+deadline misses separate instead of inventing an ambiguous total.
+
 In `Automatic`, a disruption rebuilds at the next mutually supported tier. A
 64-frame route can move to 128, then 256, then 512. Unsupported tiers are
 skipped. A configuration-time buffer rejection similarly tries the next tier.
@@ -441,6 +468,80 @@ The hardware soak samples state every 500 ms, rejects session identity changes,
 observes one additional 600 ms monitor window at the deadline, then verifies
 complete teardown. It requires a real incompatible input/output pair and may be
 skipped when the named devices or capabilities are not present.
+
+### One-hour scenario matrix
+
+The final matrix is opt-in separately so enabling the ordinary hardware tests
+cannot accidentally start six hour-long runs. Its default duration is 3600
+seconds; `SCREAMBAR_ASYNC_SRC_SOAK_SECONDS` can select the incremental 60, 300,
+900, 1800, and 3600-second stages. Quit ScreamBar first and run hardware cases
+sequentially because they share the same CoreAudio devices.
+
+The unattended stable-route cases are:
+
+```bash
+SCREAMBAR_RUN_COREAUDIO_LONG_SOAK_TESTS=1 \
+SCREAMBAR_ASYNC_SRC_INPUT_NAME="Cubilux SPDIF Receiver" \
+SCREAMBAR_ASYNC_SRC_OUTPUT_NAME="Bose QC 45" \
+SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=3600 \
+  swift test --filter testOneHourNormalConvertedRoute
+
+SCREAMBAR_RUN_COREAUDIO_LONG_SOAK_TESTS=1 \
+SCREAMBAR_ASYNC_SRC_INPUT_NAME="Cubilux SPDIF Receiver" \
+SCREAMBAR_ASYNC_SRC_OUTPUT_NAME="Bose QC 45" \
+SCREAMBAR_ASYNC_SRC_CPU_LOAD_WORKERS=8 \
+SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=3600 \
+  swift test --filter testOneHourConvertedRouteUnderHighCPULoad
+```
+
+Omit `SCREAMBAR_ASYNC_SRC_CPU_LOAD_WORKERS` to use all active CPU cores except
+two. The worker pool is always stopped during test cleanup.
+
+The four cases below require an operator, so they additionally require
+`SCREAMBAR_RUN_COREAUDIO_OPERATOR_SOAK_TESTS=1`:
+
+```bash
+SCREAMBAR_RUN_COREAUDIO_LONG_SOAK_TESTS=1 \
+SCREAMBAR_RUN_COREAUDIO_OPERATOR_SOAK_TESTS=1 \
+SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=3600 \
+  swift test --filter testOneHourSilenceThenResumeConvertedRoute
+
+SCREAMBAR_RUN_COREAUDIO_LONG_SOAK_TESTS=1 \
+SCREAMBAR_RUN_COREAUDIO_OPERATOR_SOAK_TESTS=1 \
+SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=3600 \
+  swift test --filter testOneHourFollowsCoreAudioDefaultOutputChanges
+
+SCREAMBAR_RUN_COREAUDIO_LONG_SOAK_TESTS=1 \
+SCREAMBAR_RUN_COREAUDIO_OPERATOR_SOAK_TESTS=1 \
+SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=3600 \
+  swift test --filter testOneHourCubiluxDisconnectReconnect
+
+SCREAMBAR_RUN_COREAUDIO_LONG_SOAK_TESTS=1 \
+SCREAMBAR_RUN_COREAUDIO_OPERATOR_SOAK_TESTS=1 \
+SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=3600 \
+  swift test --filter testOneHourInputRateCyclesFrom48KHzAndBack
+```
+
+The operator instructions are logged at test start. The silence test requests
+an audible reference for the first 10%, silence from 10% through 80%, and the
+same signal again for the final 20%. It proves transport continuity and reports
+callback health; it deliberately does not calculate signal amplitude in the
+real-time callback, so the operator confirms actual silence and audible resume.
+The default-output case requires at least two effective changes by default;
+override that with `SCREAMBAR_ASYNC_SRC_MINIMUM_OUTPUT_CHANGES`.
+
+Every run writes a timestamped JSON report to
+`.build/coreaudio-soak-reports` (or
+`SCREAMBAR_ASYNC_SRC_SOAK_REPORT_DIRECTORY`). Reports aggregate finalized SRC
+sessions across rebuilds and contain FIFO min/max/weighted mean, ratio
+adjustment count and min/max, underruns/overruns, resynchronizations, dropped
+frames, observed estimated-latency min/max, the configured latency ceiling,
+maximum callback gaps and execution times, callback execution-deadline misses,
+render/converter errors, effective output/rate changes, and pipeline rebuilds.
+For intentional input/rate interruptions, earlier session errors remain in the
+report as expected-interruption diagnostics while the recovered final session
+must be clean. Native common-rate sessions have no SRC FIFO and therefore do
+not contribute FIFO or ratio fields.
 
 ## Known limits
 
