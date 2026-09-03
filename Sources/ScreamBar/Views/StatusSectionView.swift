@@ -18,6 +18,20 @@ struct StatusSectionView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
             }
+            if viewModel.isUSBStartCommandRunning {
+                Text("Running USB start command…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
+            if let usbStartCommandError = viewModel.usbStartCommandError {
+                Text("USB start command error: \(usbStartCommandError)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
         }
     }
 

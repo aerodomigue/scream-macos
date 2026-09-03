@@ -6,7 +6,7 @@ struct LogEntry: Identifiable {
     let source: LogSource
     let message: String
 
-    enum LogSource: String {
+    enum LogSource: String, CaseIterable {
         case jack = "JACK"
         case scream = "Scream"
         case routing = "Routing"
@@ -36,6 +36,10 @@ final class RollingLogStore: ObservableObject {
     func clear() {
         entries.removeAll()
         currentSizeBytes = 0
+    }
+
+    func entries(matching sources: Set<LogEntry.LogSource>) -> [LogEntry] {
+        entries.filter { sources.contains($0.source) }
     }
 
     private func trimIfNeeded() {

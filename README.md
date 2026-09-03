@@ -80,7 +80,7 @@ The controls common to both modes are:
 - **Auto-start** starts the selected mode when ScreamBar launches.
 - **Launch at login** registers the application as a macOS login item.
 - **Global Shortcut** toggles the selected mode.
-- **USB Device Trigger** starts or stops the selected mode when the configured USB device connects or disconnects.
+- **USB Device Trigger** starts or stops the selected mode when the configured USB device connects or disconnects. Optional Bash commands can run before USB-triggered startup and after USB-triggered shutdown; a failed start command prevents audio startup, while a failed stop command is logged without blocking shutdown.
 
 ### Scream
 
@@ -149,7 +149,7 @@ Device, default-device, alive/hot-plug, nominal-rate, and buffer changes are mon
 
 The Status tab reports stopped, starting, running, reconfiguring, waiting, and error states as appropriate for the selected mode.
 
-The Logs tab contains application, JACK, Scream, and Direct Routing messages. Use **Clear** to reset the in-memory log.
+The Logs tab contains application, JACK, Scream, and Direct Routing messages. Its source menu can show all messages or any subset of those sources. Use **Clear** to reset the in-memory log.
 
 ScreamBar stops active audio resources before system sleep and rebuilds the previously running mode after wake. Direct Routing also rebuilds when an effective device or hardware format changes.
 

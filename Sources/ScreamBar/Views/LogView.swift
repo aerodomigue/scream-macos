@@ -4,12 +4,19 @@ struct LogView: View {
     private static let sourceColumnWidth: CGFloat = 68
 
     @ObservedObject var logStore: RollingLogStore
+    @State private var selectedSources = Set(LogEntry.LogSource.allCases)
+
+    private var filteredEntries: [LogEntry] {
+        logStore.entries(matching: selectedSources)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            if logStore.entries.isEmpty {
+            filterControls
+
+            if filteredEntries.isEmpty {
                 Spacer()
-                Text("No logs yet")
+                Text(logStore.entries.isEmpty ? "No logs yet" : "No logs match the selected filters")
                     .foregroundColor(.secondary)
                     .font(.caption)
                 Spacer()
@@ -17,7 +24,7 @@ struct LogView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(logStore.entries) { entry in
+                            ForEach(filteredEntries) { entry in
                                 logEntryRow(entry)
                                     .id(entry.id)
                             }
@@ -26,7 +33,7 @@ struct LogView: View {
                         .padding(.vertical, 4)
                     }
                     .onChange(of: logStore.entries.count) { _ in
-                        if let lastEntry = logStore.entries.last {
+                        if let lastEntry = filteredEntries.last {
                             proxy.scrollTo(lastEntry.id, anchor: .bottom)
                         }
                     }
@@ -36,7 +43,7 @@ struct LogView: View {
             Divider()
 
             HStack {
-                Text("\(logStore.entries.count) entries")
+                Text("\(filteredEntries.count) / \(logStore.entries.count) entries")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -48,6 +55,52 @@ struct LogView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
         }
+    }
+
+    private var filterControls: some View {
+        HStack {
+            Menu {
+                Button("All sources") {
+                    selectedSources = Set(LogEntry.LogSource.allCases)
+                }
+
+                Divider()
+
+                ForEach(LogEntry.LogSource.allCases, id: \.self) { source in
+                    Toggle(source.rawValue, isOn: filterBinding(for: source))
+                }
+            } label: {
+                Label(filterLabel, systemImage: "line.3.horizontal.decrease.circle")
+                    .font(.caption)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+
+    private var filterLabel: String {
+        if selectedSources.count == LogEntry.LogSource.allCases.count {
+            return "All sources"
+        }
+        if selectedSources.isEmpty {
+            return "No sources"
+        }
+        return "\(selectedSources.count) sources"
+    }
+
+    private func filterBinding(for source: LogEntry.LogSource) -> Binding<Bool> {
+        Binding(
+            get: { selectedSources.contains(source) },
+            set: { isSelected in
+                if isSelected {
+                    selectedSources.insert(source)
+                } else {
+                    selectedSources.remove(source)
+                }
+            }
+        )
     }
 
     private func logEntryRow(_ entry: LogEntry) -> some View {

@@ -142,5 +142,21 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            Section("USB Trigger Commands") {
+                TextField("Start command", text: $usbWatcherService.startCommand, axis: .vertical)
+                    .lineLimit(1...3)
+
+                Text("Runs with Bash before starting audio. A non-zero exit status prevents the start.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("Stop command", text: $usbWatcherService.stopCommand, axis: .vertical)
+                    .lineLimit(1...3)
+
+                Text("Runs with Bash when USB stops the audio. A failure is logged but does not block the stop.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
     }
 }

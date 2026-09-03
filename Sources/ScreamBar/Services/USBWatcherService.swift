@@ -11,6 +11,8 @@ private let usbWatcherLogger = Logger(
 private let usbWatcherEnabledKey = "usbWatcherEnabled"
 private let usbMonitoredDeviceKey = "usbMonitoredDevice"
 private let usbTriggerModeKey = "usbTriggerMode"
+private let usbStartCommandKey = "usbStartCommand"
+private let usbStopCommandKey = "usbStopCommand"
 
 /// Defines which USB event starts vs stops Scream.
 enum USBTriggerMode: String, Codable, CaseIterable {
@@ -60,6 +62,18 @@ final class USBWatcherService: ObservableObject {
         }
     }
 
+    @Published var startCommand: String {
+        didSet {
+            UserDefaults.standard.set(startCommand, forKey: usbStartCommandKey)
+        }
+    }
+
+    @Published var stopCommand: String {
+        didSet {
+            UserDefaults.standard.set(stopCommand, forKey: usbStopCommandKey)
+        }
+    }
+
     @Published private(set) var isDeviceConnected: Bool = false
 
     private var notificationPort: IONotificationPortRef?
@@ -70,6 +84,8 @@ final class USBWatcherService: ObservableObject {
         self.isEnabled = UserDefaults.standard.bool(forKey: usbWatcherEnabledKey)
         self.triggerMode = Self.loadTriggerMode()
         self.monitoredDevice = Self.loadMonitoredDevice()
+        self.startCommand = UserDefaults.standard.string(forKey: usbStartCommandKey) ?? ""
+        self.stopCommand = UserDefaults.standard.string(forKey: usbStopCommandKey) ?? ""
 
         if isEnabled && monitoredDevice != nil {
             startMonitoring()

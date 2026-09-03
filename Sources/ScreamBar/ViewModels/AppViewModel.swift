@@ -24,6 +24,7 @@ final class AppViewModel: ObservableObject {
     let hotkeyService = HotkeyService()
     let usbWatcherService = USBWatcherService()
     private let configurationStore: ConfigurationStore
+    private let usbTriggerCommandRunner = USBTriggerCommandRunner()
     private var cancellables = Set<AnyCancellable>()
     private var jackShouldBeRunning = false
     private var crashRecoveryGaveUp = false
@@ -33,6 +34,8 @@ final class AppViewModel: ObservableObject {
     private var serviceStartupTask: Task<Void, Never>?
     private var sleepStopTask: Task<Void, Never>?
     private var directRoutingShouldResumeAfterSleep = false
+    private var usbTriggerActionRevision: UInt64 = 0
+    private var usbStartCommandTask: Task<Void, Never>?
     private(set) var terminalShutdownFailures: [String] = []
     private static let maxJackRestartAttempts = 3
     private static let baseRestartDelaySeconds: UInt64 = 2
@@ -72,6 +75,9 @@ final class AppViewModel: ObservableObject {
             updateLoginItem()
         }
     }
+
+    @Published private(set) var usbStartCommandError: String?
+    @Published private(set) var isUSBStartCommandRunning = false
 
     var menuBarIcon: String {
         if applicationMode == .directRouting {
@@ -227,6 +233,41 @@ final class AppViewModel: ObservableObject {
     }
 
     private func handleUSBStart() {
+        usbTriggerActionRevision &+= 1
+        let revision = usbTriggerActionRevision
+        usbStartCommandTask?.cancel()
+        isUSBStartCommandRunning = true
+        usbStartCommandError = nil
+
+        let command = usbWatcherService.startCommand
+        usbStartCommandTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let output = try await self.usbTriggerCommandRunner.run(command)
+                self.logUSBCommandOutput(output, phase: "start")
+            } catch {
+                if let commandError = error as? USBTriggerCommandError {
+                    self.logUSBCommandOutput(commandError.output ?? "", phase: "start")
+                }
+                guard revision == self.usbTriggerActionRevision else { return }
+                self.isUSBStartCommandRunning = false
+                let message = error.localizedDescription
+                self.usbStartCommandError = message
+                self.logStore.append(
+                    source: .app,
+                    message: "USB start command failed: \(message)"
+                )
+                return
+            }
+
+            guard revision == self.usbTriggerActionRevision else { return }
+            self.isUSBStartCommandRunning = false
+            self.usbStartCommandError = nil
+            self.performUSBStartAction()
+        }
+    }
+
+    private func performUSBStartAction() {
         switch USBTriggerRoutingDecision.startAction(
             mode: applicationMode,
             screamToggleScope: configuration.toggleScope
@@ -241,6 +282,35 @@ final class AppViewModel: ObservableObject {
     }
 
     private func handleUSBStop() {
+        usbTriggerActionRevision &+= 1
+        usbStartCommandTask?.cancel()
+        isUSBStartCommandRunning = false
+        performUSBStopAction()
+
+        let command = usbWatcherService.stopCommand
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let output = try await self.usbTriggerCommandRunner.run(command)
+                self.logUSBCommandOutput(output, phase: "stop")
+            } catch {
+                if let commandError = error as? USBTriggerCommandError {
+                    self.logUSBCommandOutput(commandError.output ?? "", phase: "stop")
+                }
+                self.logStore.append(
+                    source: .app,
+                    message: "USB stop command failed: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func logUSBCommandOutput(_ output: String, phase: String) {
+        guard !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        logStore.append(source: .app, message: "USB \(phase) command output:\n\(output)")
+    }
+
+    private func performUSBStopAction() {
         switch USBTriggerRoutingDecision.stopAction(
             mode: applicationMode,
             screamToggleScope: configuration.toggleScope
