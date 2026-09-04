@@ -125,6 +125,7 @@ struct LogView: View {
         case .jack: return .blue
         case .scream: return .green
         case .routing: return .purple
+        case .wol: return .orange
         case .app: return .secondary
         }
     }

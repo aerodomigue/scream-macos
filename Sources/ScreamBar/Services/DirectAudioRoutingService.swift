@@ -406,8 +406,11 @@ final class DirectAudioRoutingService: ObservableObject {
                 if self.recoveringRouteSessionID == preparedRoute.sessionID {
                     escalationEvaluation = AutomaticBufferEscalationEvaluation(
                         shouldEscalate: false,
-                        newlyObservedIncidentCount: 0,
-                        recentIncidentCount: 0
+                        newlyObservedLowLevelIncidentCount: 0,
+                        recentEpisodeCount: 0,
+                        didStartEpisode: false,
+                        didEndEpisode: false,
+                        isPersistentEpisode: false
                     )
                 } else {
                     let sensitivity = self.configuration.bufferSize == .automatic
@@ -423,10 +426,24 @@ final class DirectAudioRoutingService: ObservableObject {
                             monotonicTime: self.monotonicTimeProvider()
                         )
                     if sensitivity == .relaxed,
-                       escalationEvaluation.newlyObservedIncidentCount > 0,
-                       !escalationEvaluation.shouldEscalate {
+                       escalationEvaluation.didEndEpisode {
+                        self.deviceService.checkpointRouteStability(
+                            sessionID: preparedRoute.sessionID
+                        )
                         self.report(
-                            "Relaxed automatic buffer sensitivity tolerated \(escalationEvaluation.recentIncidentCount) of 3 incidents in 10 seconds"
+                            "Relaxed automatic buffer episode recovered"
+                        )
+                    }
+                    if sensitivity == .relaxed,
+                       escalationEvaluation.didStartEpisode,
+                       !escalationEvaluation.shouldEscalate {
+                        let lowLevelIncidentDescription =
+                            escalationEvaluation
+                                .newlyObservedLowLevelIncidentCount == 1
+                            ? "1 low-level event"
+                            : "\(escalationEvaluation.newlyObservedLowLevelIncidentCount) low-level events"
+                        self.report(
+                            "Relaxed automatic buffer sensitivity recorded episode \(escalationEvaluation.recentEpisodeCount) of 3 in 10 seconds (\(lowLevelIncidentDescription))"
                         )
                     }
                 }
@@ -442,8 +459,16 @@ final class DirectAudioRoutingService: ObservableObject {
                         let reasonSuffix = latency.bufferEscalationReason.map {
                             " (\($0))"
                         } ?? ""
+                        let disruptionDescription =
+                            escalationEvaluation.isPersistentEpisode
+                            ? "a persistent runtime disruption"
+                            : escalationEvaluation.recentEpisodeCount
+                                > AutomaticBufferEscalationGate
+                                    .relaxedAllowedIncidentCount
+                                ? "4 disruption episodes within 10 seconds"
+                                : "a runtime disruption"
                         self.report(
-                            "Direct Routing increasing the automatic buffer to \(nextFrameCount) frames after a runtime disruption\(reasonSuffix)"
+                            "Direct Routing increasing the automatic buffer to \(nextFrameCount) frames after \(disruptionDescription)\(reasonSuffix)"
                         )
                         self.requestReconciliation(
                             reason: "Direct Routing rebuilding with a safer buffer"

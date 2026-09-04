@@ -10,6 +10,7 @@ struct LogEntry: Identifiable {
         case jack = "JACK"
         case scream = "Scream"
         case routing = "Routing"
+        case wol = "WOL"
         case app = "App"
     }
 }

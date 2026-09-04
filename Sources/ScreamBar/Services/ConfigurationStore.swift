@@ -21,6 +21,7 @@ private enum ConfigurationStoreError: LocalizedError {
 final class ConfigurationStore {
     private static let appConfigurationKey = "appConfiguration.v1"
     private static let legacyScreamConfigurationKey = "screamConfiguration"
+    private static let legacyAutoStartKey = "autoStart"
 
     private let userDefaults: UserDefaults
     private weak var logStore: RollingLogStore?
@@ -40,11 +41,24 @@ final class ConfigurationStore {
                     throw ConfigurationStoreError.unsupportedSchemaVersion(configuration.schemaVersion)
                 }
                 if configuration.schemaVersion < AppConfiguration.currentSchemaVersion {
+                    let migratedRuntimeState: PersistedAudioRuntimeState
+                    if configuration.schemaVersion < 4 {
+                        migratedRuntimeState = .migrated(
+                            legacyAutoStart: userDefaults.bool(
+                                forKey: Self.legacyAutoStartKey
+                            ),
+                            selectedMode: configuration.mode
+                        )
+                    } else {
+                        migratedRuntimeState = configuration.audioRuntimeState
+                    }
                     let migratedConfiguration = AppConfiguration(
                         mode: configuration.mode,
                         scream: configuration.scream,
                         directRouting: configuration.directRouting,
-                        menuBarDisplay: configuration.menuBarDisplay
+                        menuBarDisplay: configuration.menuBarDisplay,
+                        wakeOnLAN: configuration.wakeOnLAN,
+                        audioRuntimeState: migratedRuntimeState
                     )
                     save(migratedConfiguration)
                     report(

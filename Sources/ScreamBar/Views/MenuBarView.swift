@@ -28,7 +28,8 @@ struct MenuBarView: View {
                 switch selectedTab {
                 case .status:
                     if viewModel.applicationMode == .directRouting
-                        || viewModel.jackService.isInstalled {
+                        || viewModel.jackService.isInstalled
+                        || viewModel.wakeOnLANConfiguration.isEnabled {
                         StatusSectionView(viewModel: viewModel)
                     } else {
                         JackInstallGuideView()
@@ -39,9 +40,11 @@ struct MenuBarView: View {
                         configuration: $viewModel.configuration,
                         directRoutingConfiguration: $viewModel.directRoutingConfiguration,
                         menuBarDisplayConfiguration: $viewModel.menuBarDisplayConfiguration,
+                        wakeOnLANConfiguration: $viewModel.wakeOnLANConfiguration,
                         hotkeyService: viewModel.hotkeyService,
                         usbWatcherService: viewModel.usbWatcherService,
-                        directRoutingService: viewModel.directRoutingService
+                        directRoutingService: viewModel.directRoutingService,
+                        wakeOnLANService: viewModel.wakeOnLANService
                     )
                 case .logs:
                     LogView(logStore: viewModel.logStore)
@@ -53,10 +56,6 @@ struct MenuBarView: View {
 
             VStack(spacing: 6) {
                 HStack {
-                    Toggle("Auto-start", isOn: $viewModel.autoStart)
-                        .toggleStyle(.checkbox)
-                        .font(.caption)
-
                     Toggle("Launch at login", isOn: $viewModel.launchAtLogin)
                         .toggleStyle(.checkbox)
                         .font(.caption)
@@ -73,5 +72,11 @@ struct MenuBarView: View {
             .padding(.vertical, 8)
         }
         .frame(width: 380, height: 420)
+        .onAppear {
+            viewModel.wakeOnLANService.setInterfaceVisible(true)
+        }
+        .onDisappear {
+            viewModel.wakeOnLANService.setInterfaceVisible(false)
+        }
     }
 }

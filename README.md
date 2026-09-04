@@ -1,9 +1,28 @@
-# ScreamBar
+<p align="center">
+  <img src="Resources/AppIcon.iconset/icon_512x512.png" width="144" alt="ScreamBar application icon">
+</p>
 
-ScreamBar is a macOS menu bar application with two mutually exclusive audio modes:
+<h1 align="center">ScreamBar</h1>
+
+<p align="center">
+  <strong>Low-latency audio routing for the macOS menu bar.</strong><br>
+  Receive Scream network audio, route CoreAudio devices directly, and wake a remote machine from one compact application.
+</p>
+
+<p align="center">
+  macOS 13+ &nbsp;•&nbsp; SwiftUI &nbsp;•&nbsp; CoreAudio &nbsp;•&nbsp; Wake-on-LAN
+</p>
+
+<p align="center">
+  <img src="docs/screenshot/global%20capture.png" width="474" alt="ScreamBar running Direct Routing and Wake-on-LAN from the macOS menu bar">
+</p>
+
+ScreamBar provides two mutually exclusive audio modes:
 
 - **Scream** receives audio sent over the network by a [Scream](https://github.com/duncanthrax/scream) sender and plays it through JACK.
 - **Direct Routing** sends one CoreAudio input device directly to one CoreAudio output device without JACK or network capture.
+
+It can also send Wake-on-LAN magic packets independently of the selected audio mode.
 
 ScreamBar runs as a menu bar-only application and requires macOS 13 Ventura or later.
 
@@ -77,13 +96,25 @@ Click the speaker icon in the menu bar, open **Settings**, and select **Scream**
 
 The controls common to both modes are:
 
-- **Auto-start** starts the selected mode when ScreamBar launches.
+- The running/stopped state is restored on the next launch. Quit while the selected audio services are running to start them again next time; stop them before quitting to keep them stopped.
 - **Launch at login** registers the application as a macOS login item.
 - **Menu Bar** can show the active Direct Routing frame count, app-added
   latency, or both beside the icon. These values are hidden when no running
   route can provide them.
-- **Global Shortcut** toggles the selected mode.
-- **USB Device Trigger** starts or stops the selected mode when the configured USB device connects or disconnects. Optional Bash commands can run before USB-triggered startup and after USB-triggered shutdown; a failed start command prevents audio startup, while a failed stop command is logged without blocking shutdown.
+- **Global Shortcut** can use one combined shortcut for audio and Wake-on-LAN, or separate shortcuts for each action. The combined shortcut sends a magic packet only when it starts audio; pressing it again stops audio without sending another packet. Wake-on-LAN is skipped when it is disabled.
+- **USB Device Trigger** can target audio, Wake-on-LAN, or both when the configured USB device reaches the selected start condition. Its opposite event stops audio only when audio is part of the target; Wake-on-LAN has no inverse stop action. Optional Bash commands run before the selected start actions and after USB-triggered audio shutdown. A failed start command prevents all selected start actions, while a failed stop command is logged without blocking audio shutdown.
+- **Wake on LAN** adds a Status action for a configured machine. It accepts a host IPv4 address or an IPv4 subnet in CIDR notation.
+
+### Wake on LAN
+
+Enable **Wake on LAN** in Settings, then enter the target machine's MAC address and either:
+
+- its IPv4 address, such as `10.2.3.4`; or
+- its subnet in CIDR notation, such as `10.2.0.0/16`.
+
+ScreamBar sends the standard 102-byte magic packet over UDP port 9. A CIDR target is converted to its directed broadcast address (`10.2.0.0/16` → `10.2.255.255`). When a machine IPv4 address is configured, ScreamBar checks it with ICMP ping while the menu window is visible. An online machine has a green status indicator and the send button is disabled. Closing the menu cancels monitoring, so ScreamBar does not generate background ping traffic. A subnet target cannot identify one machine to ping, so its reachability indicator remains unavailable and the send action stays available.
+
+The target network and machine firmware/operating system must allow Wake-on-LAN. Some routers block directed broadcasts, and a machine that blocks ICMP may appear offline even while running.
 
 ### Scream
 
@@ -118,7 +149,7 @@ Available buffer choices are **Automatic**, 64, 128, 256, 512, 1024, and 2048 fr
 When `Automatic` is selected, the **Sensitivity** control chooses how runtime incidents affect the buffer ladder:
 
 - **Strict** increases the buffer after the first actionable incident.
-- **Relaxed** (default) tolerates up to three distinct incidents in a rolling 10-second window and increases the buffer on the fourth. Re-reading the same cumulative CoreAudio counter does not count as another incident.
+- **Relaxed** (default) tolerates up to three recovered disruption episodes in a rolling 10-second window and increases the buffer on the fourth. All low-level counter increments in one uninterrupted burst belong to the same episode. One monitor interval (approximately 500 ms) without a new incident closes the episode. An episode that remains continuously active for two seconds is treated as persistent instability and increases the buffer without waiting for four separate episodes.
 
 Changing sensitivity while Direct Routing is running updates the monitoring policy immediately without rebuilding the audio route.
 
@@ -161,7 +192,7 @@ CoreAudio can briefly pause callbacks while macOS enumerates unrelated hardware.
 
 The Status tab reports stopped, starting, running, reconfiguring, waiting, and error states as appropriate for the selected mode.
 
-The Logs tab contains application, JACK, Scream, and Direct Routing messages. Its source menu can show all messages or any subset of those sources. Use **Clear** to reset the in-memory log.
+The Logs tab contains application, JACK, Scream, Direct Routing, and WOL messages. Its source menu can show all messages or any subset of those sources. Use **Clear** to reset the in-memory log.
 
 ScreamBar stops active audio resources before system sleep and rebuilds the previously running mode after wake. Direct Routing also rebuilds when an effective device or hardware format changes.
 

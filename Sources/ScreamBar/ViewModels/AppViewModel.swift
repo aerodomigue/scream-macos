@@ -20,10 +20,12 @@ final class AppViewModel: ObservableObject {
     let jackService: JackService
     let screamService: ScreamService
     let directRoutingService: DirectAudioRoutingService
+    let wakeOnLANService: WakeOnLANService
     let audioModeCoordinator = AudioModeCoordinator()
     let hotkeyService = HotkeyService()
     let usbWatcherService = USBWatcherService()
     private let configurationStore: ConfigurationStore
+    private var audioRuntimeState: PersistedAudioRuntimeState
     private let usbTriggerCommandRunner = USBTriggerCommandRunner()
     private var cancellables = Set<AnyCancellable>()
     private var jackShouldBeRunning = false
@@ -70,9 +72,10 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    @Published var autoStart: Bool {
+    @Published var wakeOnLANConfiguration: WakeOnLANConfiguration {
         didSet {
-            UserDefaults.standard.set(autoStart, forKey: "autoStart")
+            saveConfiguration()
+            wakeOnLANService.configurationDidChange(wakeOnLANConfiguration)
         }
     }
 
@@ -142,10 +145,12 @@ final class AppViewModel: ObservableObject {
         self.applicationMode = appConfiguration.mode
         self.directRoutingConfiguration = appConfiguration.directRouting
         self.menuBarDisplayConfiguration = appConfiguration.menuBarDisplay
-        self.autoStart = UserDefaults.standard.bool(forKey: "autoStart")
+        self.wakeOnLANConfiguration = appConfiguration.wakeOnLAN
+        self.audioRuntimeState = appConfiguration.audioRuntimeState
         self.jackService = JackService(logStore: store)
         self.screamService = ScreamService(logStore: store)
         self.directRoutingService = DirectAudioRoutingService(logStore: store)
+        self.wakeOnLANService = WakeOnLANService(logStore: store)
 
         launchAtLogin = SMAppService.mainApp.status == .enabled
 
@@ -180,6 +185,11 @@ final class AppViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        wakeOnLANService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
         audioModeCoordinator.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -195,37 +205,34 @@ final class AppViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        hotkeyService.onToggle = { [weak self] in
+        hotkeyService.onAction = { [weak self] action in
             guard let self else { return }
-            self.logStore.append(source: .app, message: "Hotkey triggered toggle")
-            self.toggleActiveMode()
+            self.handleGlobalShortcut(action)
         }
 
         usbWatcherService.onStart = { [weak self] in
             guard let self else { return }
-            self.logStore.append(source: .app, message: "USB trigger — starting")
             self.handleUSBStart()
         }
 
         usbWatcherService.onStop = { [weak self] in
             guard let self else { return }
-            self.logStore.append(source: .app, message: "USB trigger — stopping")
             self.handleUSBStop()
         }
 
         setupSleepWakeObserver()
         setupApplicationActivationObserver()
         ApplicationTerminationController.shared.viewModel = self
+        wakeOnLANService.configurationDidChange(wakeOnLANConfiguration)
 
-        if autoStart {
-            startActiveMode()
-        }
+        restorePersistedAudioRuntimeState()
     }
 
     func startActiveMode() {
         guard !audioModeCoordinator.isTransitioning,
               audioModeCoordinator.transitionError == nil,
               !audioModeCoordinator.isShuttingDown else { return }
+        updateRuntimeIntent(for: applicationMode, shouldRun: true)
         startActiveModeUnchecked()
     }
 
@@ -239,6 +246,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func stopActiveMode(force: Bool = false) {
+        updateRuntimeIntent(for: applicationMode, shouldRun: false)
         switch applicationMode {
         case .scream:
             stopAll(force: force)
@@ -248,6 +256,10 @@ final class AppViewModel: ObservableObject {
     }
 
     private func handleUSBStart() {
+        logStore.append(
+            source: .app,
+            message: "USB trigger starting: \(usbWatcherService.actionTarget.label)"
+        )
         usbTriggerActionRevision &+= 1
         let revision = usbTriggerActionRevision
         usbStartCommandTask?.cancel()
@@ -283,6 +295,16 @@ final class AppViewModel: ObservableObject {
     }
 
     private func performUSBStartAction() {
+        let actionTarget = usbWatcherService.actionTarget
+        if actionTarget.includesWakeOnLAN {
+            sendWakeOnLAN()
+        }
+        if actionTarget.includesAudio {
+            performUSBStartAudioAction()
+        }
+    }
+
+    private func performUSBStartAudioAction() {
         switch USBTriggerRoutingDecision.startAction(
             mode: applicationMode,
             screamToggleScope: configuration.toggleScope
@@ -300,6 +322,10 @@ final class AppViewModel: ObservableObject {
         usbTriggerActionRevision &+= 1
         usbStartCommandTask?.cancel()
         isUSBStartCommandRunning = false
+        guard usbWatcherService.actionTarget.includesAudio else {
+            return
+        }
+        logStore.append(source: .app, message: "USB trigger stopping audio")
         performUSBStopAction()
 
         let command = usbWatcherService.stopCommand
@@ -349,11 +375,70 @@ final class AppViewModel: ObservableObject {
             }
         case .directRouting:
             if directRoutingService.desiredRunning {
-                directRoutingService.stop()
+                stopActiveMode()
             } else {
                 startActiveMode()
             }
         }
+    }
+
+    private func handleGlobalShortcut(_ action: GlobalShortcutAction) {
+        switch action {
+        case .audio:
+            logStore.append(source: .app, message: "Audio shortcut triggered")
+            toggleActiveMode()
+        case .wakeOnLAN:
+            logStore.append(source: .app, message: "Wake-on-LAN shortcut triggered")
+            sendWakeOnLAN()
+        case .audioAndWakeOnLAN:
+            let startsAudio = activeModeToggleStartsAudio
+            let startsWakeOnLAN = startsAudio
+                && wakeOnLANConfiguration.isEnabled
+            logStore.append(
+                source: .app,
+                message: combinedShortcutLogMessage(
+                    startsAudio: startsAudio,
+                    startsWakeOnLAN: startsWakeOnLAN
+                )
+            )
+            toggleActiveMode()
+            if startsWakeOnLAN {
+                sendWakeOnLAN()
+            }
+        }
+    }
+
+    private var activeModeToggleStartsAudio: Bool {
+        switch applicationMode {
+        case .scream:
+            if configuration.toggleScope == .all {
+                return screamService.status != .running
+                    && jackService.status != .running
+            }
+            return screamService.status != .running
+        case .directRouting:
+            return !directRoutingService.desiredRunning
+        }
+    }
+
+    private func sendWakeOnLAN() {
+        guard wakeOnLANConfiguration.isEnabled else { return }
+        Task { [weak self] in
+            await self?.wakeOnLANService.sendMagicPacket()
+        }
+    }
+
+    private func combinedShortcutLogMessage(
+        startsAudio: Bool,
+        startsWakeOnLAN: Bool
+    ) -> String {
+        if !startsAudio {
+            return "Combined shortcut stopping audio"
+        }
+        if startsWakeOnLAN {
+            return "Combined shortcut starting audio and Wake on LAN"
+        }
+        return "Combined shortcut starting audio"
     }
 
     func quit() {
@@ -383,21 +468,55 @@ final class AppViewModel: ObservableObject {
             return
         }
         logStore.append(source: .app, message: "Starting Scream")
+        updateScreamRuntimeIntent(
+            jackShouldRun: true,
+            screamShouldRun: true
+        )
         screamService.start(configuration: configuration)
     }
 
     func startJack() {
         guard canStartScreamRuntime else { return }
-        jackService.start(configuration: configuration)
+        updateScreamRuntimeIntent(
+            jackShouldRun: true,
+            screamShouldRun: audioRuntimeState.screamShouldRun
+        )
+        startJackUnchecked()
+    }
+
+    func stopJack(force: Bool = false) {
+        if screamService.status.isActive {
+            stopAll(force: force)
+            return
+        }
+
+        jackShouldBeRunning = false
+        updateScreamRuntimeIntent(
+            jackShouldRun: false,
+            screamShouldRun: false
+        )
+        if force {
+            jackService.forceStop()
+        } else {
+            jackService.stop()
+        }
     }
 
     func stopScream() {
+        updateScreamRuntimeIntent(
+            jackShouldRun: audioRuntimeState.jackShouldRun,
+            screamShouldRun: false
+        )
         logStore.append(source: .app, message: "Stopping Scream")
         screamService.stop()
     }
 
     func startAll(resetCrashCounter: Bool = true) {
         guard canStartScreamRuntime else { return }
+        updateScreamRuntimeIntent(
+            jackShouldRun: true,
+            screamShouldRun: true
+        )
         startAllUnchecked(resetCrashCounter: resetCrashCounter)
     }
 
@@ -458,6 +577,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func stopAll(force: Bool = false) {
+        updateScreamRuntimeIntent(
+            jackShouldRun: false,
+            screamShouldRun: false
+        )
         jackShouldBeRunning = false
         crashRecoveryGaveUp = false
         pendingRestartTask?.cancel()
@@ -591,7 +714,7 @@ final class AppViewModel: ObservableObject {
                         operation: "JACK wake cleanup"
                     ) else { return }
                     self.isSleeping = false
-                    self.startAll()
+                    self.restoreScreamRuntimeWithoutPersisting()
                 } else {
                     self.isSleeping = false
                 }
@@ -601,6 +724,7 @@ final class AppViewModel: ObservableObject {
 
     private func handleJackCrash() {
         guard jackShouldBeRunning,
+              audioRuntimeState.jackShouldRun,
               !isSleeping,
               !crashRecoveryGaveUp,
               !audioModeCoordinator.isShuttingDown else { return }
@@ -619,7 +743,11 @@ final class AppViewModel: ObservableObject {
                 operation: "JACK crash recovery"
             ) else { return }
             guard !Task.isCancelled, jackShouldBeRunning, !isSleeping, !crashRecoveryGaveUp else { return }
-            startAll(resetCrashCounter: false)
+            if audioRuntimeState.screamShouldRun {
+                startAllUnchecked(resetCrashCounter: false)
+            } else {
+                startJackUnchecked()
+            }
         }
     }
 
@@ -644,9 +772,82 @@ final class AppViewModel: ObservableObject {
                 mode: applicationMode,
                 scream: configuration,
                 directRouting: directRoutingConfiguration,
-                menuBarDisplay: menuBarDisplayConfiguration
+                menuBarDisplay: menuBarDisplayConfiguration,
+                wakeOnLAN: wakeOnLANConfiguration,
+                audioRuntimeState: audioRuntimeState
             )
         )
+    }
+
+    private func restorePersistedAudioRuntimeState() {
+        switch applicationMode {
+        case .scream:
+            restoreScreamRuntimeWithoutPersisting()
+        case .directRouting:
+            guard audioRuntimeState.directRoutingShouldRun else { return }
+            logStore.append(
+                source: .app,
+                message: "Restoring Direct Routing from the previous session"
+            )
+            directRoutingService.start(
+                configuration: directRoutingConfiguration
+            )
+        }
+    }
+
+    private func restoreScreamRuntimeWithoutPersisting() {
+        if audioRuntimeState.screamShouldRun {
+            logStore.append(
+                source: .app,
+                message: "Restoring JACK and Scream from the previous session"
+            )
+            startAllUnchecked()
+        } else if audioRuntimeState.jackShouldRun {
+            logStore.append(
+                source: .app,
+                message: "Restoring JACK from the previous session"
+            )
+            startJackUnchecked()
+        }
+    }
+
+    private func startJackUnchecked() {
+        jackShouldBeRunning = true
+        crashRecoveryGaveUp = false
+        jackService.start(configuration: configuration)
+    }
+
+    private func updateRuntimeIntent(
+        for mode: ApplicationMode,
+        shouldRun: Bool
+    ) {
+        switch mode {
+        case .scream:
+            updateScreamRuntimeIntent(
+                jackShouldRun: shouldRun,
+                screamShouldRun: shouldRun
+            )
+        case .directRouting:
+            var updatedState = audioRuntimeState
+            updatedState.setMode(.directRouting, shouldRun: shouldRun)
+            guard updatedState != audioRuntimeState else { return }
+            audioRuntimeState = updatedState
+            saveConfiguration()
+        }
+    }
+
+    private func updateScreamRuntimeIntent(
+        jackShouldRun: Bool,
+        screamShouldRun: Bool
+    ) {
+        var updatedState = audioRuntimeState
+        updatedState.setScreamRuntime(
+            jackShouldRun: jackShouldRun,
+            screamShouldRun: screamShouldRun
+        )
+        guard updatedState != audioRuntimeState else { return }
+        audioRuntimeState = updatedState
+        saveConfiguration()
     }
 
     private func wait(nanoseconds: UInt64, operation: String) async -> Bool {
@@ -692,6 +893,11 @@ final class AppViewModel: ObservableObject {
                 try await self.directRoutingService.stopAndWait()
             }
         }
+
+        updateRuntimeIntent(
+            for: applicationMode,
+            shouldRun: shouldContinueRunning
+        )
 
         logStore.append(
             source: .app,

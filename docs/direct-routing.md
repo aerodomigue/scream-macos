@@ -276,15 +276,20 @@ In `Automatic`, the sensitivity policy decides when runtime disruption reaches
 the rebuild threshold:
 
 - `Strict` rebuilds after the first new actionable incident.
-- `Relaxed` is the default. It tolerates three distinct incidents in a rolling
-  10-second monotonic window and rebuilds on the fourth.
+- `Relaxed` is the default. It tolerates three recovered disruption episodes in
+  a rolling 10-second monotonic window and rebuilds on the fourth.
 
-The policy consumes monotonic counter deltas rather than monitor polls, so one
-cumulative underrun cannot be counted again every 500 ms. Multiple new events
-reported between two polls retain their actual count. Dropped-frame volume is
-not treated as an event count; its associated ceiling-overflow or FIFO-overflow
-counter represents the incident. Changing sensitivity resets only the policy
-window and does not rebuild the running route.
+The policy consumes monotonic counter deltas rather than log messages or raw
+monitor polls. Multiple overflow/underrun callbacks in one uninterrupted burst
+are coalesced into one episode. One complete monitor interval (approximately
+500 ms) without a new low-level incident closes that episode and checkpoints
+the policy-facing counters. A new disruption after recovery starts the next
+episode. Continuous counter growth for two seconds is classified as persistent
+instability and rebuilds without manufacturing several episodes from the same
+burst. Dropped-frame volume is not itself an event count; its associated
+ceiling-overflow or FIFO-overflow counter opens the episode. Changing
+sensitivity resets only the policy window and does not rebuild the running
+route.
 
 Once the threshold is reached, a 64-frame route can move to 128, then 256, then
 512. Unsupported tiers are skipped. A configuration-time buffer rejection

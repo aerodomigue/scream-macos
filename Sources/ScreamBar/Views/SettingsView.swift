@@ -6,9 +6,11 @@ struct SettingsView: View {
     @Binding var configuration: ScreamConfiguration
     @Binding var directRoutingConfiguration: DirectRoutingConfiguration
     @Binding var menuBarDisplayConfiguration: MenuBarDisplayConfiguration
+    @Binding var wakeOnLANConfiguration: WakeOnLANConfiguration
     @ObservedObject var hotkeyService: HotkeyService
     @ObservedObject var usbWatcherService: USBWatcherService
     @ObservedObject var directRoutingService: DirectAudioRoutingService
+    @ObservedObject var wakeOnLANService: WakeOnLANService
     @State private var showingDevicePicker = false
 
     var body: some View {
@@ -96,6 +98,33 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var commonSettings: some View {
+            Section("Wake on LAN") {
+                Toggle("Enable Wake on LAN", isOn: $wakeOnLANConfiguration.isEnabled)
+
+                if wakeOnLANConfiguration.isEnabled {
+                    TextField(
+                        "MAC address",
+                        text: $wakeOnLANConfiguration.macAddress
+                    )
+                    TextField(
+                        "Machine IPv4 or subnet",
+                        text: $wakeOnLANConfiguration.destination
+                    )
+
+                    if let errorDescription =
+                        wakeOnLANService.configurationErrorDescription {
+                        Text(errorDescription)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else if let packetDestination =
+                        wakeOnLANService.resolvedPacketDestinationDescription {
+                        Text("Magic packets will be sent over UDP/9 to \(packetDestination). Machine reachability is monitored only when a host IPv4 address is configured.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section("Menu Bar") {
                 Toggle(
                     "Show frames",
@@ -114,11 +143,30 @@ struct SettingsView: View {
                 Toggle("Enable shortcut", isOn: $hotkeyService.isEnabled)
 
                 if hotkeyService.isEnabled {
+                    Picker("Shortcut mode", selection: $hotkeyService.layout) {
+                        ForEach(GlobalShortcutLayout.allCases, id: \.self) { layout in
+                            Text(layout.label).tag(layout)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
                     HStack {
-                        Text("Shortcut")
+                        Text(hotkeyService.layout == .combined ? "Audio + WOL" : "Audio")
                         Spacer()
                         KeyboardShortcuts.Recorder(for: .toggleScream)
                     }
+
+                    if hotkeyService.layout == .separate {
+                        HStack {
+                            Text("Wake on LAN")
+                            Spacer()
+                            KeyboardShortcuts.Recorder(for: .sendWakeOnLAN)
+                        }
+                    }
+
+                    Text(shortcutDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -126,6 +174,12 @@ struct SettingsView: View {
                 Toggle("Enable USB trigger", isOn: $usbWatcherService.isEnabled)
 
                 if usbWatcherService.isEnabled {
+                    Picker("Actions", selection: $usbWatcherService.actionTarget) {
+                        ForEach(AutomationActionTarget.allCases, id: \.self) { target in
+                            Text(target.label).tag(target)
+                        }
+                    }
+
                     Picker("Trigger mode", selection: $usbWatcherService.triggerMode) {
                         ForEach(USBTriggerMode.allCases, id: \.self) { mode in
                             Text(mode.label).tag(mode)
@@ -155,6 +209,13 @@ struct SettingsView: View {
                     Button("Select Device...") {
                         showingDevicePicker = true
                     }
+
+                    if usbWatcherService.actionTarget.includesWakeOnLAN
+                        && !wakeOnLANConfiguration.isEnabled {
+                        Text("Enable and configure Wake on LAN to send a magic packet.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -162,16 +223,26 @@ struct SettingsView: View {
                 TextField("Start command", text: $usbWatcherService.startCommand, axis: .vertical)
                     .lineLimit(1...3)
 
-                Text("Runs with Bash before starting audio. A non-zero exit status prevents the start.")
+                Text("Runs with Bash before the selected USB start actions. A non-zero exit status prevents them.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 TextField("Stop command", text: $usbWatcherService.stopCommand, axis: .vertical)
                     .lineLimit(1...3)
+                    .disabled(!usbWatcherService.actionTarget.includesAudio)
 
-                Text("Runs with Bash when USB stops the audio. A failure is logged but does not block the stop.")
+                Text("Runs with Bash when USB stops audio. Wake-on-LAN-only triggers have no stop action.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+    }
+
+    private var shortcutDescription: String {
+        switch hotkeyService.layout {
+        case .combined:
+            return "Starts audio and sends Wake on LAN when it is enabled. Press again to stop audio without sending another packet."
+        case .separate:
+            return "The Audio shortcut toggles the selected audio mode. The Wake on LAN shortcut only sends a magic packet."
+        }
     }
 }

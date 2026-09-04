@@ -2,16 +2,21 @@ import Foundation
 
 struct AutomaticBufferEscalationEvaluation: Equatable, Sendable {
     let shouldEscalate: Bool
-    let newlyObservedIncidentCount: Int
-    let recentIncidentCount: Int
+    let newlyObservedLowLevelIncidentCount: Int
+    let recentEpisodeCount: Int
+    let didStartEpisode: Bool
+    let didEndEpisode: Bool
+    let isPersistentEpisode: Bool
 }
 
 struct AutomaticBufferEscalationGate: Sendable {
     static let relaxedAllowedIncidentCount = 3
     static let relaxedWindowSeconds: TimeInterval = 10
+    static let relaxedPersistentEpisodeSeconds: TimeInterval = 2
 
     private var lastObservedCumulativeIncidentCount: UInt64 = 0
-    private var recentIncidentTimes: [TimeInterval] = []
+    private var recentEpisodeTimes: [TimeInterval] = []
+    private var activeEpisodeStartTime: TimeInterval?
 
     mutating func evaluate(
         sensitivity: DirectRoutingAutomaticSensitivity,
@@ -19,56 +24,66 @@ struct AutomaticBufferEscalationGate: Sendable {
         cumulativeIncidentCount: UInt64,
         monotonicTime: TimeInterval
     ) -> AutomaticBufferEscalationEvaluation {
-        guard sensitivity == .relaxed else {
-            return AutomaticBufferEscalationEvaluation(
-                shouldEscalate: routeRequiresEscalation,
-                newlyObservedIncidentCount: routeRequiresEscalation ? 1 : 0,
-                recentIncidentCount: routeRequiresEscalation ? 1 : 0
-            )
-        }
-
-        discardExpiredIncidents(at: monotonicTime)
-        let newIncidentCount = newIncidentCount(
+        discardExpiredEpisodes(at: monotonicTime)
+        let newLowLevelIncidentCount = newIncidentCount(
             cumulativeIncidentCount: cumulativeIncidentCount
         )
         lastObservedCumulativeIncidentCount = cumulativeIncidentCount
 
-        if routeRequiresEscalation, newIncidentCount > 0 {
-            let escalationThreshold = Self.relaxedAllowedIncidentCount + 1
-            let remainingIncidentCapacity = max(
-                0,
-                escalationThreshold - recentIncidentTimes.count
-            )
-            let recordedIncidentCount = min(
-                newIncidentCount,
-                UInt64(remainingIncidentCapacity)
-            )
-            recentIncidentTimes.append(
-                contentsOf: repeatElement(
-                    monotonicTime,
-                    count: Int(recordedIncidentCount)
-                )
+        guard sensitivity == .relaxed else {
+            return AutomaticBufferEscalationEvaluation(
+                shouldEscalate: routeRequiresEscalation,
+                newlyObservedLowLevelIncidentCount: Int(
+                    min(newLowLevelIncidentCount, UInt64(Int.max))
+                ),
+                recentEpisodeCount: routeRequiresEscalation ? 1 : 0,
+                didStartEpisode: routeRequiresEscalation,
+                didEndEpisode: false,
+                isPersistentEpisode: false
             )
         }
 
+        let hasNewLowLevelIncident = routeRequiresEscalation
+            && newLowLevelIncidentCount > 0
+        var didStartEpisode = false
+        var didEndEpisode = false
+        if hasNewLowLevelIncident {
+            if activeEpisodeStartTime == nil {
+                activeEpisodeStartTime = monotonicTime
+                recentEpisodeTimes.append(monotonicTime)
+                didStartEpisode = true
+            }
+        } else if activeEpisodeStartTime != nil {
+            activeEpisodeStartTime = nil
+            didEndEpisode = true
+        }
+
+        let isPersistentEpisode = activeEpisodeStartTime.map {
+            monotonicTime - $0 >= Self.relaxedPersistentEpisodeSeconds
+        } ?? false
         return AutomaticBufferEscalationEvaluation(
             shouldEscalate:
-                recentIncidentTimes.count > Self.relaxedAllowedIncidentCount,
-            newlyObservedIncidentCount: Int(
-                min(newIncidentCount, UInt64(Int.max))
+                recentEpisodeTimes.count > Self.relaxedAllowedIncidentCount
+                || isPersistentEpisode,
+            newlyObservedLowLevelIncidentCount: Int(
+                min(newLowLevelIncidentCount, UInt64(Int.max))
             ),
-            recentIncidentCount: recentIncidentTimes.count
+            recentEpisodeCount: recentEpisodeTimes.count,
+            didStartEpisode: didStartEpisode,
+            didEndEpisode: didEndEpisode,
+            isPersistentEpisode: isPersistentEpisode
         )
     }
 
     mutating func reset() {
         lastObservedCumulativeIncidentCount = 0
-        recentIncidentTimes.removeAll(keepingCapacity: true)
+        recentEpisodeTimes.removeAll(keepingCapacity: true)
+        activeEpisodeStartTime = nil
     }
 
-    private mutating func discardExpiredIncidents(at monotonicTime: TimeInterval) {
+    private mutating func discardExpiredEpisodes(at monotonicTime: TimeInterval) {
         let cutoff = monotonicTime - Self.relaxedWindowSeconds
-        recentIncidentTimes.removeAll { $0 <= cutoff }
+        recentEpisodeTimes.removeAll { $0 <= cutoff }
     }
 
     private func newIncidentCount(

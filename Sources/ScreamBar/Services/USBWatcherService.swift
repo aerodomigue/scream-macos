@@ -11,6 +11,7 @@ private let usbWatcherLogger = Logger(
 private let usbWatcherEnabledKey = "usbWatcherEnabled"
 private let usbMonitoredDeviceKey = "usbMonitoredDevice"
 private let usbTriggerModeKey = "usbTriggerMode"
+private let usbActionTargetKey = "usbActionTarget"
 private let usbStartCommandKey = "usbStartCommand"
 private let usbStopCommandKey = "usbStopCommand"
 
@@ -35,9 +36,11 @@ final class USBWatcherService: ObservableObject {
     var onStart: (() -> Void)?
     var onStop: (() -> Void)?
 
+    private let userDefaults: UserDefaults
+
     @Published var isEnabled: Bool {
         didSet {
-            UserDefaults.standard.set(isEnabled, forKey: usbWatcherEnabledKey)
+            userDefaults.set(isEnabled, forKey: usbWatcherEnabledKey)
             if isEnabled {
                 startMonitoring()
             } else {
@@ -48,7 +51,16 @@ final class USBWatcherService: ObservableObject {
 
     @Published var triggerMode: USBTriggerMode {
         didSet {
-            UserDefaults.standard.set(triggerMode.rawValue, forKey: usbTriggerModeKey)
+            userDefaults.set(triggerMode.rawValue, forKey: usbTriggerModeKey)
+        }
+    }
+
+    @Published var actionTarget: AutomationActionTarget {
+        didSet {
+            userDefaults.set(
+                actionTarget.rawValue,
+                forKey: usbActionTargetKey
+            )
         }
     }
 
@@ -64,13 +76,13 @@ final class USBWatcherService: ObservableObject {
 
     @Published var startCommand: String {
         didSet {
-            UserDefaults.standard.set(startCommand, forKey: usbStartCommandKey)
+            userDefaults.set(startCommand, forKey: usbStartCommandKey)
         }
     }
 
     @Published var stopCommand: String {
         didSet {
-            UserDefaults.standard.set(stopCommand, forKey: usbStopCommandKey)
+            userDefaults.set(stopCommand, forKey: usbStopCommandKey)
         }
     }
 
@@ -80,12 +92,14 @@ final class USBWatcherService: ObservableObject {
     private var connectIterator: io_iterator_t = 0
     private var disconnectIterator: io_iterator_t = 0
 
-    init() {
-        self.isEnabled = UserDefaults.standard.bool(forKey: usbWatcherEnabledKey)
-        self.triggerMode = Self.loadTriggerMode()
-        self.monitoredDevice = Self.loadMonitoredDevice()
-        self.startCommand = UserDefaults.standard.string(forKey: usbStartCommandKey) ?? ""
-        self.stopCommand = UserDefaults.standard.string(forKey: usbStopCommandKey) ?? ""
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        self.isEnabled = userDefaults.bool(forKey: usbWatcherEnabledKey)
+        self.triggerMode = Self.loadTriggerMode(from: userDefaults)
+        self.actionTarget = Self.loadActionTarget(from: userDefaults)
+        self.monitoredDevice = Self.loadMonitoredDevice(from: userDefaults)
+        self.startCommand = userDefaults.string(forKey: usbStartCommandKey) ?? ""
+        self.stopCommand = userDefaults.string(forKey: usbStopCommandKey) ?? ""
 
         if isEnabled && monitoredDevice != nil {
             startMonitoring()
@@ -253,12 +267,12 @@ final class USBWatcherService: ObservableObject {
 
     private func saveMonitoredDevice() {
         guard let device = monitoredDevice else {
-            UserDefaults.standard.removeObject(forKey: usbMonitoredDeviceKey)
+            userDefaults.removeObject(forKey: usbMonitoredDeviceKey)
             return
         }
         do {
             let encodedDevice = try JSONEncoder().encode(device)
-            UserDefaults.standard.set(encodedDevice, forKey: usbMonitoredDeviceKey)
+            userDefaults.set(encodedDevice, forKey: usbMonitoredDeviceKey)
         } catch {
             usbWatcherLogger.error(
                 "Failed to save monitored USB device: \(error.localizedDescription)"
@@ -266,16 +280,31 @@ final class USBWatcherService: ObservableObject {
         }
     }
 
-    private static func loadTriggerMode() -> USBTriggerMode {
-        guard let raw = UserDefaults.standard.string(forKey: usbTriggerModeKey),
+    private static func loadTriggerMode(
+        from userDefaults: UserDefaults
+    ) -> USBTriggerMode {
+        guard let raw = userDefaults.string(forKey: usbTriggerModeKey),
               let mode = USBTriggerMode(rawValue: raw) else {
             return .startOnConnect
         }
         return mode
     }
 
-    private static func loadMonitoredDevice() -> USBDeviceIdentifier? {
-        guard let encodedDevice = UserDefaults.standard.data(forKey: usbMonitoredDeviceKey) else {
+    private static func loadActionTarget(
+        from userDefaults: UserDefaults
+    ) -> AutomationActionTarget {
+        guard let rawValue = userDefaults.string(
+            forKey: usbActionTargetKey
+        ), let target = AutomationActionTarget(rawValue: rawValue) else {
+            return .audio
+        }
+        return target
+    }
+
+    private static func loadMonitoredDevice(
+        from userDefaults: UserDefaults
+    ) -> USBDeviceIdentifier? {
+        guard let encodedDevice = userDefaults.data(forKey: usbMonitoredDeviceKey) else {
             return nil
         }
         do {

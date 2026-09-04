@@ -1,13 +1,15 @@
 import Foundation
 
 struct AppConfiguration: Codable, Equatable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 4
 
     let schemaVersion: Int
     var mode: ApplicationMode
     var scream: ScreamConfiguration
     var directRouting: DirectRoutingConfiguration
     var menuBarDisplay: MenuBarDisplayConfiguration
+    var wakeOnLAN: WakeOnLANConfiguration
+    var audioRuntimeState: PersistedAudioRuntimeState
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -15,6 +17,8 @@ struct AppConfiguration: Codable, Equatable {
         case scream
         case directRouting
         case menuBarDisplay
+        case wakeOnLAN
+        case audioRuntimeState
     }
 
     init(
@@ -23,13 +27,18 @@ struct AppConfiguration: Codable, Equatable {
         scream: ScreamConfiguration = ScreamConfiguration(),
         directRouting: DirectRoutingConfiguration = DirectRoutingConfiguration(),
         menuBarDisplay: MenuBarDisplayConfiguration =
-            MenuBarDisplayConfiguration()
+            MenuBarDisplayConfiguration(),
+        wakeOnLAN: WakeOnLANConfiguration = WakeOnLANConfiguration(),
+        audioRuntimeState: PersistedAudioRuntimeState =
+            PersistedAudioRuntimeState()
     ) {
         self.schemaVersion = schemaVersion
         self.mode = mode
         self.scream = scream
         self.directRouting = directRouting
         self.menuBarDisplay = menuBarDisplay
+        self.wakeOnLAN = wakeOnLAN
+        self.audioRuntimeState = audioRuntimeState
     }
 
     init(from decoder: Decoder) throws {
@@ -45,6 +54,14 @@ struct AppConfiguration: Codable, Equatable {
             MenuBarDisplayConfiguration.self,
             forKey: .menuBarDisplay
         ) ?? MenuBarDisplayConfiguration()
+        wakeOnLAN = try container.decodeIfPresent(
+            WakeOnLANConfiguration.self,
+            forKey: .wakeOnLAN
+        ) ?? WakeOnLANConfiguration()
+        audioRuntimeState = try container.decodeIfPresent(
+            PersistedAudioRuntimeState.self,
+            forKey: .audioRuntimeState
+        ) ?? PersistedAudioRuntimeState()
     }
 
     func encode(to encoder: Encoder) throws {
@@ -54,5 +71,7 @@ struct AppConfiguration: Codable, Equatable {
         try container.encode(scream, forKey: .scream)
         try container.encode(directRouting, forKey: .directRouting)
         try container.encode(menuBarDisplay, forKey: .menuBarDisplay)
+        try container.encode(wakeOnLAN, forKey: .wakeOnLAN)
+        try container.encode(audioRuntimeState, forKey: .audioRuntimeState)
     }
 }

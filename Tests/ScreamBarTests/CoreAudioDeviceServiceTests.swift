@@ -189,7 +189,7 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         try await routingService.stopAndWait()
     }
 
-    func testRelaxedAutomaticSensitivityEscalatesOnFourthIncidentInTenSeconds() async throws {
+    func testRelaxedAutomaticSensitivityEscalatesOnFourthEpisodeInTenSeconds() async throws {
         let input = makeDevice(
             uid: "input",
             supportsOutput: false,
@@ -228,9 +228,20 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         await routingService.waitForIdle()
 
         var cumulativeIncidentCount: UInt64 = 0
+        var monitorPollCount = 0
         backend.routeLatencyProvider = { sessionID in
             guard backend.startedSessionIDs.contains(sessionID) else {
                 return healthyLatency
+            }
+            monitorPollCount += 1
+            guard monitorPollCount.isMultiple(of: 2) == false else {
+                return CoreAudioRouteLatency(
+                    estimatedApplicationSeconds: 0.004,
+                    maximumApplicationSeconds: 0.005,
+                    isLowLatency: true,
+                    requiresBufferEscalation: false,
+                    bufferEscalationIncidentCount: cumulativeIncidentCount
+                )
             }
             cumulativeIncidentCount += 1
             return CoreAudioRouteLatency(
@@ -244,7 +255,7 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
             )
         }
         let rebuilt = expectation(
-            description: "relaxed sensitivity rebuilds on the fourth incident"
+            description: "relaxed sensitivity rebuilds on the fourth episode"
         )
         backend.onPrepareRoute = {
             guard backend.preparedRoutes.count == 2 else { return }
@@ -253,7 +264,7 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
             rebuilt.fulfill()
         }
 
-        await fulfillment(of: [rebuilt], timeout: 3)
+        await fulfillment(of: [rebuilt], timeout: 5)
         await routingService.waitForIdle()
 
         XCTAssertEqual(cumulativeIncidentCount, 4)
@@ -264,10 +275,93 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         XCTAssertEqual(
             logStore.entries.filter {
                 $0.message.contains(
-                    "Relaxed automatic buffer sensitivity tolerated"
+                    "Relaxed automatic buffer sensitivity recorded episode"
                 )
             }.count,
             3
+        )
+        try await routingService.stopAndWait()
+    }
+
+    func testRelaxedAutomaticSensitivityTreatsOverflowBurstAsOneEpisode() async throws {
+        let input = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 44_100
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [input, output],
+                input: input,
+                output: output
+            )
+        )
+        let healthyLatency = CoreAudioRouteLatency(
+            estimatedApplicationSeconds: 0.004,
+            maximumApplicationSeconds: 0.005,
+            isLowLatency: true,
+            requiresBufferEscalation: false
+        )
+        backend.routeLatencyValue = healthyLatency
+        let logStore = RollingLogStore()
+        let routingService = DirectAudioRoutingService(
+            logStore: logStore,
+            deviceService: makeService(backend: backend),
+            permissionService: AudioInputPermissionSpy()
+        )
+        routingService.start(
+            configuration: DirectRoutingConfiguration(
+                automaticSensitivity: .relaxed
+            )
+        )
+        await routingService.waitForIdle()
+
+        var monitorPollCount = 0
+        backend.routeLatencyProvider = { sessionID in
+            guard backend.startedSessionIDs.contains(sessionID) else {
+                return healthyLatency
+            }
+            monitorPollCount += 1
+            guard monitorPollCount == 1 else {
+                return CoreAudioRouteLatency(
+                    estimatedApplicationSeconds: 0.004,
+                    maximumApplicationSeconds: 0.005,
+                    isLowLatency: true,
+                    requiresBufferEscalation: false,
+                    bufferEscalationIncidentCount: 16
+                )
+            }
+            return CoreAudioRouteLatency(
+                estimatedApplicationSeconds: 0.006,
+                maximumApplicationSeconds: 0.009,
+                isLowLatency: true,
+                requiresBufferEscalation: true,
+                bufferEscalationReason:
+                    "FIFO writes above latency ceiling: 16, dropped input frames: 996",
+                bufferEscalationIncidentCount: 16
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 1_300_000_000)
+
+        XCTAssertEqual(backend.preparedRoutes.count, 1)
+        XCTAssertTrue(backend.stoppedSessionIDs.isEmpty)
+        XCTAssertEqual(backend.stabilityCheckpointSessionIDs.count, 1)
+        XCTAssertTrue(
+            logStore.entries.contains {
+                $0.message.contains("recorded episode 1 of 3")
+                    && $0.message.contains("16 low-level events")
+            }
+        )
+        XCTAssertTrue(
+            logStore.entries.contains {
+                $0.message == "Relaxed automatic buffer episode recovered"
+            }
         )
         try await routingService.stopAndWait()
     }
