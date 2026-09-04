@@ -1,4 +1,5 @@
 @testable import ScreamBar
+import AudioToolbox
 import CoreAudio
 import XCTest
 
@@ -71,6 +72,58 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         XCTAssertEqual(backend.preparedRoutes.first?.sampleRatePlan, route.route.sampleRatePlan)
         XCTAssertEqual(backend.preparedRoutes.first?.requestedBufferFrameSize, 64)
         XCTAssertEqual(route.route.bufferFrameSize, 64)
+    }
+
+    func testPreparedRoutePublishesPostConfigurationPhysicalFormats() async throws {
+        let initialInput = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 44_100,
+            supportedRates: [44_100, 48_000],
+            inputPhysicalStreamFormats: [makePhysicalFormat(sampleRate: 44_100)]
+        )
+        let refreshedInput = makeDevice(
+            uid: "input",
+            supportsOutput: false,
+            sampleRate: 48_000,
+            supportedRates: [44_100, 48_000],
+            inputPhysicalStreamFormats: [makePhysicalFormat(sampleRate: 48_000)]
+        )
+        let output = makeDevice(
+            uid: "output",
+            supportsInput: false,
+            sampleRate: 48_000,
+            outputPhysicalStreamFormats: [makePhysicalFormat(sampleRate: 48_000)]
+        )
+        let backend = CoreAudioBackendSpy(
+            snapshot: makeSnapshot(
+                devices: [initialInput, output],
+                input: initialInput,
+                output: output
+            )
+        )
+        backend.snapshotAfterPrepare = makeSnapshot(
+            devices: [refreshedInput, output],
+            input: refreshedInput,
+            output: output
+        )
+        let service = makeService(backend: backend)
+
+        let preparedRoute = try await service.prepareRoute(
+            inputSelection: .systemDefault,
+            outputSelection: .systemDefault
+        )
+
+        XCTAssertEqual(
+            preparedRoute.route.input.primaryInputPhysicalStreamFormat?
+                .sampleRate,
+            48_000
+        )
+        XCTAssertEqual(
+            preparedRoute.route.output.primaryOutputPhysicalStreamFormat?
+                .sampleRate,
+            48_000
+        )
     }
 
     func testAutomaticConvertedRouteEscalatesBufferAfterRuntimeDisruption() async throws {
@@ -1604,7 +1657,9 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
         inputChannelCount: Int = 2,
         currentBufferFrameSize: UInt32 = 512,
         minimumBufferFrameSize: UInt32 = 64,
-        maximumBufferFrameSize: UInt32 = 2_048
+        maximumBufferFrameSize: UInt32 = 2_048,
+        inputPhysicalStreamFormats: [AudioHardwareStreamFormat] = [],
+        outputPhysicalStreamFormats: [AudioHardwareStreamFormat] = []
     ) -> AudioDeviceDescriptor {
         AudioDeviceDescriptor(
             id: AudioDeviceUID(rawValue: uid),
@@ -1621,7 +1676,24 @@ final class CoreAudioDeviceServiceTests: XCTestCase {
             supportedBufferFrameSizeRange: AudioBufferFrameSizeRange(
                 minimum: minimumBufferFrameSize,
                 maximum: maximumBufferFrameSize
-            )
+            ),
+            inputPhysicalStreamFormats: inputPhysicalStreamFormats,
+            outputPhysicalStreamFormats: outputPhysicalStreamFormats
+        )
+    }
+
+    private func makePhysicalFormat(
+        sampleRate: Double
+    ) -> AudioHardwareStreamFormat {
+        AudioHardwareStreamFormat(
+            sampleRate: sampleRate,
+            channelCount: 2,
+            formatID: kAudioFormatLinearPCM,
+            formatFlags: kAudioFormatFlagIsSignedInteger,
+            bitsPerChannel: 16,
+            bytesPerFrame: 4,
+            framesPerPacket: 1,
+            bytesPerPacket: 4
         )
     }
 
@@ -1710,7 +1782,11 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
                         descriptor.supportedNominalSampleRates
                     ),
                     currentBufferFrameSize: descriptor.currentBufferFrameSize,
-                    supportedBufferFrameSizeRange: descriptor.supportedBufferFrameSizeRange
+                    supportedBufferFrameSizeRange: descriptor.supportedBufferFrameSizeRange,
+                    inputPhysicalStreamFormats:
+                        descriptor.inputPhysicalStreamFormats,
+                    outputPhysicalStreamFormats:
+                        descriptor.outputPhysicalStreamFormats
                 )
             },
             defaultInputUID: snapshot.defaultInputUID,

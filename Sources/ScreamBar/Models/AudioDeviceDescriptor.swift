@@ -15,6 +15,8 @@ struct AudioDeviceDescriptor: Identifiable, Codable, Equatable, Sendable {
     let supportedNominalSampleRates: [NominalSampleRateRange]
     let currentBufferFrameSize: UInt32?
     let supportedBufferFrameSizeRange: AudioBufferFrameSizeRange?
+    let inputPhysicalStreamFormats: [AudioHardwareStreamFormat]
+    let outputPhysicalStreamFormats: [AudioHardwareStreamFormat]
 
     init(
         id: AudioDeviceUID,
@@ -25,7 +27,9 @@ struct AudioDeviceDescriptor: Identifiable, Codable, Equatable, Sendable {
         currentNominalSampleRate: Double,
         supportedNominalSampleRates: [NominalSampleRateRange],
         currentBufferFrameSize: UInt32? = nil,
-        supportedBufferFrameSizeRange: AudioBufferFrameSizeRange? = nil
+        supportedBufferFrameSizeRange: AudioBufferFrameSizeRange? = nil,
+        inputPhysicalStreamFormats: [AudioHardwareStreamFormat] = [],
+        outputPhysicalStreamFormats: [AudioHardwareStreamFormat] = []
     ) {
         self.id = id
         self.name = name
@@ -36,6 +40,8 @@ struct AudioDeviceDescriptor: Identifiable, Codable, Equatable, Sendable {
         self.supportedNominalSampleRates = supportedNominalSampleRates
         self.currentBufferFrameSize = currentBufferFrameSize
         self.supportedBufferFrameSizeRange = supportedBufferFrameSizeRange
+        self.inputPhysicalStreamFormats = inputPhysicalStreamFormats
+        self.outputPhysicalStreamFormats = outputPhysicalStreamFormats
     }
 
     var supportsInput: Bool {
@@ -44,6 +50,14 @@ struct AudioDeviceDescriptor: Identifiable, Codable, Equatable, Sendable {
 
     var supportsOutput: Bool {
         outputChannelCount > 0
+    }
+
+    var primaryInputPhysicalStreamFormat: AudioHardwareStreamFormat? {
+        inputPhysicalStreamFormats.first
+    }
+
+    var primaryOutputPhysicalStreamFormat: AudioHardwareStreamFormat? {
+        outputPhysicalStreamFormats.first
     }
 }
 

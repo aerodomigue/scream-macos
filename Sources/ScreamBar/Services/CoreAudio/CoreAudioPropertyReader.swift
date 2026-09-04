@@ -104,6 +104,15 @@ enum CoreAudioPropertyReader {
         return value
     }
 
+    static func readStreamFormat(
+        objectID: AudioObjectID,
+        address: AudioObjectPropertyAddress
+    ) throws -> AudioStreamBasicDescription {
+        var value = AudioStreamBasicDescription()
+        try readScalar(objectID: objectID, address: address, value: &value)
+        return value
+    }
+
     static func readAudioDeviceID(
         objectID: AudioObjectID,
         address: AudioObjectPropertyAddress

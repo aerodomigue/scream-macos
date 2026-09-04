@@ -1037,17 +1037,19 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             )
         )
         let bufferMetadata = readBufferFrameMetadata(deviceID: deviceID)
+        let inputChannelCount = try CoreAudioPropertyReader.readChannelCount(
+            deviceID: deviceID,
+            scope: kAudioDevicePropertyScopeInput
+        )
+        let outputChannelCount = try CoreAudioPropertyReader.readChannelCount(
+            deviceID: deviceID,
+            scope: kAudioDevicePropertyScopeOutput
+        )
         return AudioDeviceDescriptor(
             id: AudioDeviceUID(rawValue: uid),
             name: name,
-            inputChannelCount: try CoreAudioPropertyReader.readChannelCount(
-                deviceID: deviceID,
-                scope: kAudioDevicePropertyScopeInput
-            ),
-            outputChannelCount: try CoreAudioPropertyReader.readChannelCount(
-                deviceID: deviceID,
-                scope: kAudioDevicePropertyScopeOutput
-            ),
+            inputChannelCount: inputChannelCount,
+            outputChannelCount: outputChannelCount,
             isAlive: try CoreAudioPropertyReader.readUInt32(
                 objectID: deviceID,
                 address: AudioObjectPropertyAddress(
@@ -1066,8 +1068,56 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
                 }
             ),
             currentBufferFrameSize: bufferMetadata.current,
-            supportedBufferFrameSizeRange: bufferMetadata.range
+            supportedBufferFrameSizeRange: bufferMetadata.range,
+            inputPhysicalStreamFormats: readPhysicalStreamFormats(
+                deviceID: deviceID,
+                scope: kAudioDevicePropertyScopeInput
+            ),
+            outputPhysicalStreamFormats: readPhysicalStreamFormats(
+                deviceID: deviceID,
+                scope: kAudioDevicePropertyScopeOutput
+            )
         )
+    }
+
+    private func readPhysicalStreamFormats(
+        deviceID: AudioDeviceID,
+        scope: AudioObjectPropertyScope
+    ) -> [AudioHardwareStreamFormat] {
+        let streamsAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        do {
+            let streamIDs = try CoreAudioPropertyReader.readAudioObjectIDs(
+                objectID: deviceID,
+                address: streamsAddress
+            )
+            return streamIDs.compactMap { streamID in
+                do {
+                    let streamFormat = try CoreAudioPropertyReader.readStreamFormat(
+                        objectID: streamID,
+                        address: AudioObjectPropertyAddress(
+                            mSelector: kAudioStreamPropertyPhysicalFormat,
+                            mScope: kAudioObjectPropertyScopeGlobal,
+                            mElement: kAudioObjectPropertyElementMain
+                        )
+                    )
+                    return AudioHardwareStreamFormat(streamFormat)
+                } catch {
+                    legacyCoreAudioLogger.debug(
+                        "Could not read physical stream format for CoreAudio stream \(streamID, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    )
+                    return nil
+                }
+            }
+        } catch {
+            legacyCoreAudioLogger.debug(
+                "Could not read physical stream formats for CoreAudio device \(deviceID, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return []
+        }
     }
 
     private static func normalizedDeviceName(_ name: String) -> String {

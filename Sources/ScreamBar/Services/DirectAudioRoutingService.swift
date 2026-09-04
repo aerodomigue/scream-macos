@@ -293,6 +293,9 @@ final class DirectAudioRoutingService: ObservableObject {
             let routeLogDescription = routeDescription(route.route)
                 + convertedRouteBufferDiagnostic(route.route)
             report("Direct Routing active: \(routeLogDescription)")
+            report(
+                "Direct Routing formats: \(route.route.hardwareFormatDiagnosticDescription)"
+            )
             startLatencyMonitor(for: route)
         } catch is CancellationError {
             if let preparedRoute {

@@ -440,6 +440,38 @@ Do not treat four parallel simulated processes as a substitute for the hardware
 test. Parallel runs intentionally add scheduler pressure; hardware validation is
 best run alone so competing test processes do not contaminate the audio result.
 
+### Cubilux hardware loopback latency
+
+The dedicated loopback test measures the complete external path independently
+of Direct Routing:
+
+```text
+Mac CoreAudio output -> Cubilux TX -> TOSLINK -> Cubilux RX -> Mac CoreAudio input
+```
+
+It opens one output-only AUHAL and one input-only AUHAL at their unchanged
+current nominal rate. It does not create an Aggregate Device, run the SRC/FIFO,
+change a hardware buffer, request Hog Mode, or change a macOS default device.
+Signal detection uses normalized chirp correlation. Because the two USB devices
+have independent sample clocks, their timelines are aligned using CoreAudio
+`mHostTime`; device-local `mSampleTime` values are never compared directly.
+
+```bash
+SCREAMBAR_RUN_CUBILUX_LOOPBACK_TESTS=1 \
+  swift test --filter CoreAudioCubiluxLoopbackIntegrationTests
+```
+
+The default endpoints are output `USB SPDIF Adapter` and input
+`Cubilux SPDIF Receiver`. Override names with
+`SCREAMBAR_CUBILUX_LOOPBACK_OUTPUT_NAME` and
+`SCREAMBAR_CUBILUX_LOOPBACK_INPUT_NAME`, or use the corresponding `_UID`
+variables for an exact match. `SCREAMBAR_CUBILUX_LOOPBACK_ITERATIONS` controls
+the repeated marker count. Reports under `.build/coreaudio-soak-reports`
+contain every accepted sample offset, min/median/p95/max/range, missed or
+ambiguous markers, signal peak/RMS/clipping, physical ASBDs, and callback error
+telemetry. The result includes HAL and USB buffering around both adapters; it is
+not the intrinsic latency of TOSLINK conversion alone.
+
 ### Hardware route
 
 Quit ScreamBar before the integration run so the test owns the route. The test

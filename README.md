@@ -153,6 +153,12 @@ The Logs tab contains application, JACK, Scream, and Direct Routing messages. It
 
 ScreamBar stops active audio resources before system sleep and rebuilds the previously running mode after wake. Direct Routing also rebuilds when an effective device or hardware format changes.
 
+### Routing format and latency
+
+When Direct Routing is running, Status shows the selected input and output's physical CoreAudio stream format, including sample rate, channels, and bit depth or sample representation. It also shows the deterministic Float32 non-interleaved client format used by ScreamBar. The Direct Routing log includes the complete physical `AudioStreamBasicDescription` (ASBD), including format ID, flags, bytes per frame, and packet sizing, so DAC, ADC, USB, and S/PDIF issues can be diagnosed without guessing.
+
+`App-added latency` is not hardware end-to-end latency. A reported value such as `≈ 4 ms` includes only ScreamBar's own buffering and sample-rate conversion. It excludes the source machine or Windows audio stack, network transport, USB transport, USB-to-S/PDIF or S/PDIF-to-USB conversion in an adapter such as Cubilux, and the output device's hardware, codec, or Bluetooth radio latency. The complete PC-to-headphones delay can therefore be much higher than the value shown by ScreamBar.
+
 ## Tests
 
 Run unit and contract tests with:
@@ -177,6 +183,29 @@ SCREAMBAR_ASYNC_SRC_OUTPUT_NAME="Bose QC 45" \
 SCREAMBAR_ASYNC_SRC_SOAK_SECONDS=60 \
   swift test --filter CoreAudioAsyncSRCIntegrationTests
 ```
+
+The Cubilux TX/RX loopback latency test bypasses Direct Routing. It sends a
+deterministic chirp through `USB SPDIF Adapter`, captures
+`Cubilux SPDIF Receiver`, and uses sample correlation plus CoreAudio host
+timestamps to measure the complete loop. It never changes the system defaults,
+Hog Mode, hardware sample rates, or hardware buffer sizes. Quit ScreamBar and
+connect TX → TOSLINK → RX before running it:
+
+```bash
+SCREAMBAR_RUN_CUBILUX_LOOPBACK_TESTS=1 \
+  swift test --filter CoreAudioCubiluxLoopbackIntegrationTests
+```
+
+Override device names, UIDs, or the iteration count with
+`SCREAMBAR_CUBILUX_LOOPBACK_INPUT_NAME`,
+`SCREAMBAR_CUBILUX_LOOPBACK_OUTPUT_NAME`,
+`SCREAMBAR_CUBILUX_LOOPBACK_INPUT_UID`,
+`SCREAMBAR_CUBILUX_LOOPBACK_OUTPUT_UID`, and
+`SCREAMBAR_CUBILUX_LOOPBACK_ITERATIONS`. The JSON report is written beside the
+CoreAudio soak reports. Its latency is explicitly the observed
+**Mac CoreAudio output → Cubilux TX → TOSLINK → Cubilux RX → Mac CoreAudio
+input** path; it includes CoreAudio/HAL and USB buffering and is not the
+intrinsic optical-conversion latency alone.
 
 The simulated converter soaks are opt-in and can be run independently. The value is a wall-clock duration in seconds:
 

@@ -16,6 +16,11 @@ let package = Package(
             path: "Sources/ScreamBarCoreAudioRT",
             publicHeadersPath: "include"
         ),
+        .target(
+            name: "ScreamBarLoopbackTestRT",
+            path: "Tests/ScreamBarLoopbackTestRT",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
             name: "ScreamBar",
             dependencies: [
@@ -33,9 +38,14 @@ let package = Package(
         ),
         .testTarget(
             name: "ScreamBarTests",
-            dependencies: ["ScreamBar", "ScreamBarCoreAudioRT"],
+            dependencies: [
+                "ScreamBar",
+                "ScreamBarCoreAudioRT",
+                "ScreamBarLoopbackTestRT",
+            ],
             path: "Tests/ScreamBarTests",
             linkerSettings: [
+                .linkedFramework("Accelerate"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("AVFAudio"),
                 .linkedFramework("CoreAudio"),

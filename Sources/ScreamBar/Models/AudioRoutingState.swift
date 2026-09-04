@@ -47,6 +47,40 @@ struct EffectiveAudioRoute: Equatable, Sendable {
     var usesSampleRateConversion: Bool {
         sampleRatePlan.usesSampleRateConversion
     }
+
+    var inputPhysicalFormatStatusDescription: String {
+        input.primaryInputPhysicalStreamFormat?.statusDescription
+            ?? "\(Int(inputNominalSampleRate.rounded())) Hz · \(input.inputChannelCount) ch · physical format unavailable"
+    }
+
+    var outputPhysicalFormatStatusDescription: String {
+        output.primaryOutputPhysicalStreamFormat?.statusDescription
+            ?? "\(Int(outputNominalSampleRate.rounded())) Hz · \(output.outputChannelCount) ch · physical format unavailable"
+    }
+
+    var inputClientFormatStatusDescription: String {
+        "\(Int(inputNominalSampleRate.rounded())) Hz · \(input.inputChannelCount) ch · Float32 non-interleaved"
+    }
+
+    var outputClientFormatStatusDescription: String {
+        "\(Int(outputNominalSampleRate.rounded())) Hz · \(output.outputChannelCount) ch · Float32 non-interleaved"
+    }
+
+    var hardwareFormatDiagnosticDescription: String {
+        let inputFormats = input.inputPhysicalStreamFormats
+            .map(\.diagnosticDescription)
+            .joined(separator: "; ")
+        let outputFormats = output.outputPhysicalStreamFormats
+            .map(\.diagnosticDescription)
+            .joined(separator: "; ")
+        let inputDescription = inputFormats.isEmpty
+            ? "physical format unavailable"
+            : inputFormats
+        let outputDescription = outputFormats.isEmpty
+            ? "physical format unavailable"
+            : outputFormats
+        return "Input physical: \(inputDescription); input client: \(inputClientFormatStatusDescription); output physical: \(outputDescription); output client: \(outputClientFormatStatusDescription)"
+    }
 }
 
 struct PreparedAudioRoute: Equatable, Sendable {

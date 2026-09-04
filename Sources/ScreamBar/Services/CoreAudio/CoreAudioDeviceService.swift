@@ -256,12 +256,16 @@ final class CoreAudioDeviceService: ObservableObject {
             reportListenerReconciliationFailure(error)
         }
 
+        let refreshedInputDevice = snapshot.device(withUID: inputDevice.id)
+            ?? inputDevice
+        let refreshedOutputDevice = snapshot.device(withUID: outputDevice.id)
+            ?? outputDevice
         let routeLatency = backend.routeLatency(sessionID: sessionID)
         return PreparedAudioRoute(
             sessionID: sessionID,
             route: EffectiveAudioRoute(
-                input: inputDevice,
-                output: outputDevice,
+                input: refreshedInputDevice,
+                output: refreshedOutputDevice,
                 sampleRatePlan: sampleRatePlan,
                 isUsingOutputFallback: resolution.isUsingOutputFallback,
                 bufferFrameSize: effectiveBufferFrameSize,

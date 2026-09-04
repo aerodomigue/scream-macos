@@ -111,9 +111,9 @@ struct StatusSectionView: View {
         switch viewModel.directRoutingService.state {
         case .running(let route):
             let fallbackSuffix = route.isUsingOutputFallback ? " (fallback)" : ""
-            let rateDescription = route.usesSampleRateConversion
-                ? "\(Int(route.inputNominalSampleRate)) → \(Int(route.outputNominalSampleRate)) Hz · converted"
-                : "\(Int(route.nominalSampleRate)) Hz"
+            let pipelineDescription = route.usesSampleRateConversion
+                ? "Conversion: \(Int(route.inputNominalSampleRate)) → \(Int(route.outputNominalSampleRate)) Hz · Float32 internal"
+                : "Shared clock: \(Int(route.nominalSampleRate)) Hz · Float32 client"
             let bufferDescription = DirectRoutingBufferDescription.make(
                 configuredSize: viewModel.directRoutingConfiguration.bufferSize,
                 effectiveFrameCount: route.bufferFrameSize
@@ -128,7 +128,7 @@ struct StatusSectionView: View {
             } else {
                 latencySuffix = ""
             }
-            return "\(route.input.name) → \(route.output.name)\(fallbackSuffix)\n\(rateDescription)\n\(bufferDescription)\(latencySuffix)"
+            return "\(route.input.name) → \(route.output.name)\(fallbackSuffix)\nInput physical: \(route.inputPhysicalFormatStatusDescription)\n\(pipelineDescription)\nOutput physical: \(route.outputPhysicalFormatStatusDescription)\nOutput client: \(route.outputClientFormatStatusDescription)\n\(bufferDescription)\(latencySuffix)"
         case .waitingForInput:
             return "Waiting for input"
         case .waitingForOutput:
