@@ -272,9 +272,23 @@ xrun counter for this topology, so reports keep underruns, overruns,
 latency-ceiling overruns, resynchronizations, dropped frames, and callback
 deadline misses separate instead of inventing an ambiguous total.
 
-In `Automatic`, a disruption rebuilds at the next mutually supported tier. A
-64-frame route can move to 128, then 256, then 512. Unsupported tiers are
-skipped. A configuration-time buffer rejection similarly tries the next tier.
+In `Automatic`, the sensitivity policy decides when runtime disruption reaches
+the rebuild threshold:
+
+- `Strict` rebuilds after the first new actionable incident.
+- `Relaxed` is the default. It tolerates three distinct incidents in a rolling
+  10-second monotonic window and rebuilds on the fourth.
+
+The policy consumes monotonic counter deltas rather than monitor polls, so one
+cumulative underrun cannot be counted again every 500 ms. Multiple new events
+reported between two polls retain their actual count. Dropped-frame volume is
+not treated as an event count; its associated ceiling-overflow or FIFO-overflow
+counter represents the incident. Changing sensitivity resets only the policy
+window and does not rebuild the running route.
+
+Once the threshold is reached, a 64-frame route can move to 128, then 256, then
+512. Unsupported tiers are skipped. A configuration-time buffer rejection
+similarly tries the next tier.
 If no safer tier exists, or an explicit tier is unstable, Direct Routing stops
 with `latencyStabilityLimitExceeded` rather than looping forever.
 
@@ -300,12 +314,24 @@ observed hardware change refreshes the published inventory and increments its
 revision. Rapid events are debounced/coalesced before Direct Routing compares a
 new effective-route signature with the active one.
 
-That signature contains the effective input/output UIDs, fallback state,
-channel counts, alive state, current and supported nominal rates, and current
-and supported buffer sizes. The route therefore remains running when only an
-unselected device is added or removed (for example, an unused HDMI display).
-It also remains running when macOS changes the default output while the user's
-explicit preferred output is still present and effective.
+That signature contains only the effective input/output UIDs, fallback state,
+channel counts, alive state, and current nominal rates. Advertised rate ranges
+and buffer metadata are still published to the UI, but a volatile metadata
+change cannot invalidate a stream that is already running. The route therefore
+remains running when only an unselected device is added or removed (for
+example, a non-default audio device or an unused HDMI display). It also remains
+running when macOS changes the default output while the user's explicit
+preferred output is still present and effective.
+
+macOS can pause CoreAudio callbacks briefly while it enumerates unrelated
+hardware. For an inventory revision whose effective-route signature is
+unchanged, ScreamBar keeps the existing Audio Units open and starts a two-second
+recovery window. Runtime disruptions observed in that window remain in the raw
+soak telemetry, but a stability checkpoint prevents those cumulative counters
+from triggering a later buffer escalation. New errors after the checkpoint are
+still evaluated normally. Callback sizes larger than the requested hardware
+quantum affect the calculated latency but only an actual preallocated frame
+limit violation is an escalation reason.
 
 A rebuild is still required when:
 
@@ -314,14 +340,13 @@ A rebuild is still required when:
 - the default changes while an explicit-output fallback is active;
 - the preferred explicit output returns and replaces its fallback;
 - an effective input/output endpoint disappears or changes a signature
-  property such as channels, nominal-rate capabilities/current rate, or buffer
-  capabilities/current size.
+  property such as channels, alive state, or current nominal rate.
 
 `System Default` is resolved again during the rebuild rather than replaced by a
 persisted concrete UID. Likewise, explicit fallback never overwrites the saved
 preferred UID.
 
-Every effective device, nominal-rate, channel-layout, or buffer change follows:
+Every effective device, nominal-rate, channel-layout, or alive-state change follows:
 
 ```text
 stop -> remove callbacks -> uninitialize -> dispose Audio Units

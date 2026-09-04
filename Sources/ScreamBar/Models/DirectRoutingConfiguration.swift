@@ -4,21 +4,25 @@ struct DirectRoutingConfiguration: Codable, Equatable, Sendable {
     var inputSelection: AudioDeviceSelection = .systemDefault
     var outputSelection: AudioDeviceSelection = .systemDefault
     var bufferSize: DirectRoutingBufferSize = .automatic
+    var automaticSensitivity: DirectRoutingAutomaticSensitivity = .relaxed
 
     private enum CodingKeys: String, CodingKey {
         case inputSelection
         case outputSelection
         case bufferSize
+        case automaticSensitivity
     }
 
     init(
         inputSelection: AudioDeviceSelection = .systemDefault,
         outputSelection: AudioDeviceSelection = .systemDefault,
-        bufferSize: DirectRoutingBufferSize = .automatic
+        bufferSize: DirectRoutingBufferSize = .automatic,
+        automaticSensitivity: DirectRoutingAutomaticSensitivity = .relaxed
     ) {
         self.inputSelection = inputSelection
         self.outputSelection = outputSelection
         self.bufferSize = bufferSize
+        self.automaticSensitivity = automaticSensitivity
     }
 
     init(from decoder: Decoder) throws {
@@ -35,5 +39,9 @@ struct DirectRoutingConfiguration: Codable, Equatable, Sendable {
             DirectRoutingBufferSize.self,
             forKey: .bufferSize
         ) ?? .automatic
+        automaticSensitivity = try container.decodeIfPresent(
+            DirectRoutingAutomaticSensitivity.self,
+            forKey: .automaticSensitivity
+        ) ?? .relaxed
     }
 }

@@ -43,7 +43,8 @@ final class ConfigurationStore {
                     let migratedConfiguration = AppConfiguration(
                         mode: configuration.mode,
                         scream: configuration.scream,
-                        directRouting: configuration.directRouting
+                        directRouting: configuration.directRouting,
+                        menuBarDisplay: configuration.menuBarDisplay
                     )
                     save(migratedConfiguration)
                     report(

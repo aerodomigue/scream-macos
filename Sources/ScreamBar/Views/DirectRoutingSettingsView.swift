@@ -39,6 +39,31 @@ struct DirectRoutingSettingsView: View {
                 }
             }
 
+            HStack {
+                Text("Automatic sensitivity")
+                Spacer()
+                Picker("", selection: $configuration.automaticSensitivity) {
+                    ForEach(
+                        DirectRoutingAutomaticSensitivity.allCases,
+                        id: \.self
+                    ) { sensitivity in
+                        Text(sensitivity.label).tag(sensitivity)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 150)
+                .disabled(configuration.bufferSize != .automatic)
+            }
+
+            Text(
+                configuration.bufferSize == .automatic
+                    ? configuration.automaticSensitivity.helpText
+                    : "Select Automatic buffer size to enable sensitivity."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
             Text("Lower values reduce latency but may cause audio dropouts. Automatic is recommended for Bluetooth devices.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -87,7 +112,8 @@ struct DirectRoutingSettingsView: View {
         case .running(let route):
             let bufferDescription = DirectRoutingBufferDescription.make(
                 configuredSize: configuration.bufferSize,
-                effectiveFrameCount: route.bufferFrameSize
+                effectiveFrameCount: route.bufferFrameSize,
+                automaticSensitivity: configuration.automaticSensitivity
             )
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(route.input.name) → \(route.output.name)")

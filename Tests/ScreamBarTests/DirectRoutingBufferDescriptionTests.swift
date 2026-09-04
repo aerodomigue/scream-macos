@@ -12,6 +12,17 @@ final class DirectRoutingBufferDescriptionTests: XCTestCase {
         )
     }
 
+    func testAutomaticBufferIncludesSensitivityWhenProvided() {
+        XCTAssertEqual(
+            DirectRoutingBufferDescription.make(
+                configuredSize: .automatic,
+                effectiveFrameCount: 64,
+                automaticSensitivity: .relaxed
+            ),
+            "Automatic Relaxed · 64 frames active"
+        )
+    }
+
     func testExplicitBufferDoesNotRepeatMatchingEffectiveTier() {
         XCTAssertEqual(
             DirectRoutingBufferDescription.make(

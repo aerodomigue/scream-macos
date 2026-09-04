@@ -44,6 +44,7 @@ final class CoreAudioDeviceService: ObservableObject {
     )
 
     var onHardwareChanged: (() -> Void)?
+    var onHardwareChangeObserved: (() -> Void)?
 
     private let backend: any CoreAudioBackend
     private let timing: CoreAudioServiceTiming
@@ -65,7 +66,9 @@ final class CoreAudioDeviceService: ObservableObject {
         self.backend = backend ?? CoreAudioBackendFactory.makeBackend()
         self.timing = timing
         self.backend.onHardwareChanged = { [weak self] in
-            self?.scheduleHardwareRefresh()
+            guard let self else { return }
+            self.onHardwareChangeObserved?()
+            self.scheduleHardwareRefresh()
         }
 
         do {
@@ -310,6 +313,10 @@ final class CoreAudioDeviceService: ObservableObject {
 
     func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency? {
         backend.routeLatency(sessionID: sessionID)
+    }
+
+    func checkpointRouteStability(sessionID: UUID) {
+        backend.checkpointRouteStability(sessionID: sessionID)
     }
 
     func stopAndDestroyRoute(sessionID: UUID) throws {

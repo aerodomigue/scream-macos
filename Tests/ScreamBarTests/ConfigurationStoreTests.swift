@@ -79,6 +79,14 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertEqual(migratedConfiguration.schemaVersion, 2)
         XCTAssertEqual(migratedConfiguration.mode, .directRouting)
         XCTAssertEqual(migratedConfiguration.directRouting.bufferSize, .automatic)
+        XCTAssertEqual(
+            migratedConfiguration.directRouting.automaticSensitivity,
+            .relaxed
+        )
+        XCTAssertEqual(
+            migratedConfiguration.menuBarDisplay,
+            MenuBarDisplayConfiguration()
+        )
     }
 
     func testRemovedDirectSampleRateSettingIsIgnoredWhenLoadingExistingSettings() throws {
@@ -100,5 +108,55 @@ final class ConfigurationStoreTests: XCTestCase {
 
         XCTAssertEqual(loadedConfiguration.mode, .directRouting)
         XCTAssertEqual(loadedConfiguration.directRouting.bufferSize, .frames128)
+        XCTAssertEqual(
+            loadedConfiguration.directRouting.automaticSensitivity,
+            .relaxed
+        )
+    }
+
+    func testAutomaticBufferSensitivityIsPersisted() {
+        let suiteName = "ConfigurationStoreTests.\(UUID().uuidString)"
+        guard let userDefaults = UserDefaults(suiteName: suiteName) else {
+            return XCTFail("Unable to create isolated UserDefaults suite")
+        }
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let store = ConfigurationStore(
+            userDefaults: userDefaults,
+            logStore: RollingLogStore()
+        )
+        let configuration = AppConfiguration(
+            directRouting: DirectRoutingConfiguration(
+                automaticSensitivity: .strict
+            )
+        )
+
+        store.save(configuration)
+
+        XCTAssertEqual(
+            store.load().directRouting.automaticSensitivity,
+            .strict
+        )
+    }
+
+    func testMenuBarDisplaySelectionIsPersisted() {
+        let suiteName = "ConfigurationStoreTests.\(UUID().uuidString)"
+        guard let userDefaults = UserDefaults(suiteName: suiteName) else {
+            return XCTFail("Unable to create isolated UserDefaults suite")
+        }
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let store = ConfigurationStore(
+            userDefaults: userDefaults,
+            logStore: RollingLogStore()
+        )
+        let configuration = AppConfiguration(
+            menuBarDisplay: MenuBarDisplayConfiguration(
+                showFrames: true,
+                showApplicationLatency: true
+            )
+        )
+
+        store.save(configuration)
+
+        XCTAssertEqual(store.load().menuBarDisplay, configuration.menuBarDisplay)
     }
 }

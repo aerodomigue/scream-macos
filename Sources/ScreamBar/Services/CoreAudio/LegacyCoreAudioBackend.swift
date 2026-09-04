@@ -128,22 +128,17 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         var aggregateDeviceID: AudioDeviceID?
         var playthrough: (any CoreAudioRouteTransport)?
         var bufferFrameSizeRestores: [BufferFrameSizeRestore]
-        var expectedInputCallbackFrames: UInt32?
-        var expectedOutputCallbackFrames: UInt32?
+        var stabilityCheckpoint = AsyncSRCStabilityCounters.zero
         var didPublishFinalAsyncSRCMetrics = false
 
         init(
             aggregateDeviceID: AudioDeviceID? = nil,
             playthrough: (any CoreAudioRouteTransport)? = nil,
-            bufferFrameSizeRestores: [BufferFrameSizeRestore] = [],
-            expectedInputCallbackFrames: UInt32? = nil,
-            expectedOutputCallbackFrames: UInt32? = nil
+            bufferFrameSizeRestores: [BufferFrameSizeRestore] = []
         ) {
             self.aggregateDeviceID = aggregateDeviceID
             self.playthrough = playthrough
             self.bufferFrameSizeRestores = bufferFrameSizeRestores
-            self.expectedInputCallbackFrames = expectedInputCallbackFrames
-            self.expectedOutputCallbackFrames = expectedOutputCallbackFrames
         }
 
         var hasLiveCoreAudioResources: Bool {
@@ -464,10 +459,6 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
                 )
             case let .converted(inputSampleRate, outputSampleRate):
                 try validateOwnership()
-                resources.expectedInputCallbackFrames = requestedBufferFrameSize
-                    ?? input.currentBufferFrameSize
-                resources.expectedOutputCallbackFrames = requestedBufferFrameSize
-                    ?? output.currentBufferFrameSize
                 do {
                     resources.playthrough = try AsyncSRCPlaythrough.make(
                         inputDeviceID: inputDeviceID,
@@ -557,26 +548,14 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             )
         }
         let metrics = convertedPlaythrough.metrics
-        let callbackExceededConfiguredQuantum = metrics.map {
-            if let expectedInputCallbackFrames =
-                resources.expectedInputCallbackFrames,
-               $0.maximumInputCallbackFrames > expectedInputCallbackFrames {
-                return true
-            }
-            if let expectedOutputCallbackFrames =
-                resources.expectedOutputCallbackFrames,
-               $0.maximumOutputCallbackFrames > expectedOutputCallbackFrames {
-                return true
-            }
-            return false
-        } ?? false
+        let stabilityCounters = metrics.map {
+            AsyncSRCStabilityCounters(metrics: $0)
+                .subtracting(resources.stabilityCheckpoint)
+        } ?? .zero
         let escalationReasons = metrics.map {
             Self.bufferEscalationReasons(
                 metrics: $0,
-                callbackExceededConfiguredQuantum:
-                    callbackExceededConfiguredQuantum,
-                missedCallbackDeadline:
-                    convertedPlaythrough.hasMissedCallbackDeadline
+                since: resources.stabilityCheckpoint
             )
         } ?? []
         return CoreAudioRouteLatency(
@@ -588,7 +567,34 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             requiresBufferEscalation: !escalationReasons.isEmpty,
             bufferEscalationReason: escalationReasons.isEmpty
                 ? nil
-                : escalationReasons.joined(separator: ", ")
+                : escalationReasons.joined(separator: ", "),
+            bufferEscalationIncidentCount:
+                stabilityCounters.totalIncidentCount
+        )
+    }
+
+    func checkpointRouteStability(sessionID: UUID) {
+        guard let resources = routes[sessionID],
+              let convertedPlaythrough = resources.playthrough
+                as? AsyncSRCPlaythrough,
+              let metrics = convertedPlaythrough.metrics else {
+            return
+        }
+        resources.stabilityCheckpoint = AsyncSRCStabilityCounters(
+            metrics: metrics
+        )
+    }
+
+    nonisolated static func bufferEscalationReasons(
+        metrics: AsyncSRCMetrics,
+        since checkpoint: AsyncSRCStabilityCounters
+    ) -> [String] {
+        let counters = AsyncSRCStabilityCounters(metrics: metrics)
+            .subtracting(checkpoint)
+        return bufferEscalationReasons(
+            counters: counters,
+            callbackExceededConfiguredQuantum: false,
+            missedCallbackDeadline: counters.hasMissedCallbackDeadline
         )
     }
 
@@ -609,44 +615,59 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         callbackExceededConfiguredQuantum: Bool,
         missedCallbackDeadline: Bool
     ) -> [String] {
+        bufferEscalationReasons(
+            counters: AsyncSRCStabilityCounters(metrics: metrics),
+            callbackExceededConfiguredQuantum:
+                callbackExceededConfiguredQuantum,
+            missedCallbackDeadline: missedCallbackDeadline
+        )
+    }
+
+    private nonisolated static func bufferEscalationReasons(
+        counters: AsyncSRCStabilityCounters,
+        callbackExceededConfiguredQuantum: Bool,
+        missedCallbackDeadline: Bool
+    ) -> [String] {
         var reasons: [String] = []
-        if metrics.inputRenderErrorCount > 0 {
-            reasons.append("input render errors: \(metrics.inputRenderErrorCount)")
+        if counters.inputRenderErrorCount > 0 {
+            reasons.append("input render errors: \(counters.inputRenderErrorCount)")
         }
-        if metrics.outputRenderErrorCount > 0 {
-            reasons.append("output render errors: \(metrics.outputRenderErrorCount)")
+        if counters.outputRenderErrorCount > 0 {
+            reasons.append("output render errors: \(counters.outputRenderErrorCount)")
         }
-        if metrics.rateParameterErrorCount > 0 {
-            reasons.append("converter rate errors: \(metrics.rateParameterErrorCount)")
+        if counters.rateParameterErrorCount > 0 {
+            reasons.append("converter rate errors: \(counters.rateParameterErrorCount)")
         }
-        if metrics.latencyCeilingOverflowCount > 0 {
+        if counters.latencyCeilingOverflowCount > 0 {
             reasons.append(
-                "FIFO writes above latency ceiling: \(metrics.latencyCeilingOverflowCount)"
+                "FIFO writes above latency ceiling: \(counters.latencyCeilingOverflowCount)"
             )
         }
-        if metrics.inputCallbackFrameLimitExceededCount > 0 {
+        if counters.inputCallbackFrameLimitExceededCount > 0 {
             reasons.append(
-                "input callback frame-limit violations: \(metrics.inputCallbackFrameLimitExceededCount)"
+                "input callback frame-limit violations: \(counters.inputCallbackFrameLimitExceededCount)"
             )
         }
-        if metrics.outputCallbackFrameLimitExceededCount > 0 {
+        if counters.outputCallbackFrameLimitExceededCount > 0 {
             reasons.append(
-                "output callback frame-limit violations: \(metrics.outputCallbackFrameLimitExceededCount)"
+                "output callback frame-limit violations: \(counters.outputCallbackFrameLimitExceededCount)"
             )
         }
-        if metrics.overflowCount > 0 {
-            reasons.append("FIFO overflows: \(metrics.overflowCount)")
+        if counters.overflowCount > 0 {
+            reasons.append("FIFO overflows: \(counters.overflowCount)")
         }
-        if metrics.resynchronizationCount > 0 {
-            reasons.append("FIFO resynchronizations: \(metrics.resynchronizationCount)")
+        if counters.resynchronizationCount > 0 {
+            reasons.append("FIFO resynchronizations: \(counters.resynchronizationCount)")
         }
-        if metrics.droppedInputFrames > 0 {
-            reasons.append("dropped input frames: \(metrics.droppedInputFrames)")
+        if counters.droppedInputFrames > 0 {
+            reasons.append("dropped input frames: \(counters.droppedInputFrames)")
         }
-        if metrics.latencyCeilingUnderrunCount > 0 {
+        if counters.latencyCeilingUnderrunCount > 0 {
             reasons.append(
-                "FIFO underruns at latency ceiling: \(metrics.latencyCeilingUnderrunCount)"
+                "FIFO underruns at latency ceiling: \(counters.latencyCeilingUnderrunCount)"
             )
+        } else if counters.underrunCount > 0 {
+            reasons.append("FIFO underruns: \(counters.underrunCount)")
         }
         if callbackExceededConfiguredQuantum {
             reasons.append("callback exceeded the configured frame quantum")

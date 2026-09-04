@@ -112,11 +112,13 @@ struct StatusSectionView: View {
         case .running(let route):
             let fallbackSuffix = route.isUsingOutputFallback ? " (fallback)" : ""
             let pipelineDescription = route.usesSampleRateConversion
-                ? "Conversion: \(Int(route.inputNominalSampleRate)) → \(Int(route.outputNominalSampleRate)) Hz · Float32 internal"
-                : "Shared clock: \(Int(route.nominalSampleRate)) Hz · Float32 client"
+                ? "Conversion: \(Int(route.inputNominalSampleRate)) → \(Int(route.outputNominalSampleRate)) Hz"
+                : "Shared clock: \(Int(route.nominalSampleRate)) Hz"
             let bufferDescription = DirectRoutingBufferDescription.make(
                 configuredSize: viewModel.directRoutingConfiguration.bufferSize,
-                effectiveFrameCount: route.bufferFrameSize
+                effectiveFrameCount: route.bufferFrameSize,
+                automaticSensitivity:
+                    viewModel.directRoutingConfiguration.automaticSensitivity
             )
             let latencySuffix: String
             if route.usesSampleRateConversion,
@@ -128,7 +130,7 @@ struct StatusSectionView: View {
             } else {
                 latencySuffix = ""
             }
-            return "\(route.input.name) → \(route.output.name)\(fallbackSuffix)\nInput physical: \(route.inputPhysicalFormatStatusDescription)\n\(pipelineDescription)\nOutput physical: \(route.outputPhysicalFormatStatusDescription)\nOutput client: \(route.outputClientFormatStatusDescription)\n\(bufferDescription)\(latencySuffix)"
+            return "\(route.input.name) → \(route.output.name)\(fallbackSuffix)\nInput physical: \(route.inputPhysicalFormatStatusDescription)\n\(pipelineDescription)\nOutput physical: \(route.outputPhysicalFormatStatusDescription)\n\(bufferDescription)\(latencySuffix)"
         case .waitingForInput:
             return "Waiting for input"
         case .waitingForOutput:

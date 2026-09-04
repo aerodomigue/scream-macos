@@ -79,6 +79,9 @@ The controls common to both modes are:
 
 - **Auto-start** starts the selected mode when ScreamBar launches.
 - **Launch at login** registers the application as a macOS login item.
+- **Menu Bar** can show the active Direct Routing frame count, app-added
+  latency, or both beside the icon. These values are hidden when no running
+  route can provide them.
 - **Global Shortcut** toggles the selected mode.
 - **USB Device Trigger** starts or stops the selected mode when the configured USB device connects or disconnects. Optional Bash commands can run before USB-triggered startup and after USB-triggered shutdown; a failed start command prevents audio startup, while a failed stop command is logged without blocking shutdown.
 
@@ -108,9 +111,16 @@ The first output choice is **System Default**. An explicitly selected output is 
 
 Available buffer choices are **Automatic**, 64, 128, 256, 512, 1024, and 2048 frames:
 
-- **Automatic** leaves synchronized routes at the devices' current buffer sizes. When asynchronous sample-rate conversion is required, it starts with the smallest common supported tier from 64, 128, 256, and 512 frames. It can rebuild at the next tier after a runtime disruption.
+- **Automatic** leaves synchronized routes at the devices' current buffer sizes. When asynchronous sample-rate conversion is required, it starts with the smallest common supported tier from 64, 128, 256, and 512 frames. It can rebuild at the next tier after a persistent route disruption.
 - An explicit value must be supported by both devices. ScreamBar applies and verifies it before starting, then restores the previous values when the route stops unless another client changed them in the meantime.
 - Smaller buffers can reduce the CoreAudio portion of latency but increase the risk of dropouts. If an automatic tier is rejected during configuration, ScreamBar tries the next tier. Bluetooth transport latency remains independent of this setting; Automatic is recommended for Bluetooth devices.
+
+When `Automatic` is selected, the **Sensitivity** control chooses how runtime incidents affect the buffer ladder:
+
+- **Strict** increases the buffer after the first actionable incident.
+- **Relaxed** (default) tolerates up to three distinct incidents in a rolling 10-second window and increases the buffer on the fourth. Re-reading the same cumulative CoreAudio counter does not count as another incident.
+
+Changing sensitivity while Direct Routing is running updates the monitoring policy immediately without rebuilding the audio route.
 
 Bluetooth outputs follow the same generic CoreAudio negotiation path and are best-effort. No Bluetooth-specific workaround is applied.
 
@@ -129,7 +139,7 @@ The output device remains the timing master. Conversion uses Apple's Varispeed a
 
 The converter targets no more than 5 ms of app-added latency. Its FIFO may grow only as needed within a 10 ms low-latency ceiling to absorb callback phase, clock drift, and scheduling jitter. If a device combination cannot operate reliably inside that ceiling, ScreamBar uses the existing last-resort fallback and displays its calculated latency instead of a fixed estimate. This value excludes latency inside the physical input, output, codec, or Bluetooth transport.
 
-Automatic mode also monitors callback-size violations, callback deadline misses, underruns, overflows, and FIFO resynchronization. A disrupted converted route is rebuilt at the next buffer tier actually supported by both devices. If no safer shared tier exists, the route stops with a contextual error instead of retrying unsupported sizes. Route logs include the configured buffer policy and effective tier, and distinguish an unstable explicit setting from an exhausted Automatic ladder.
+Automatic mode also monitors callback allocation-limit violations, callback deadline misses, underruns, overflows, and FIFO resynchronization. Sensitivity is evaluated outside the real-time callbacks from monotonic incident counters. A disrupted converted route is rebuilt at the next buffer tier actually supported by both devices when the selected sensitivity threshold is reached. A callback quantum larger than the requested device buffer is included in latency accounting but is not, by itself, treated as a route failure. If no safer shared tier exists, the route stops with a contextual error instead of retrying unsupported sizes. Route logs include the configured buffer policy, effective tier, sensitivity, and semantic incident reason.
 
 #### CoreAudio behavior
 
@@ -143,7 +153,9 @@ The route remains in shared mode:
 
 The synchronized playthrough uses one AUHAL in one clock domain, with input IO on element 1 and output IO on element 0. It prefers the native AUHAL software-playthrough connection with a deterministic Float32 client PCM format. CoreAudio may convert normal PCM representation or interleaving, but the client format uses the negotiated hardware rate. The asynchronous path uses separate deterministic Float32 formats at the input and output native rates, with conversion performed explicitly between them.
 
-Device, default-device, alive/hot-plug, nominal-rate, and buffer changes are monitored, and every change still refreshes the published CoreAudio inventory and hardware revision. Direct Routing rebuilds only when the effective input/output or one of their relevant capabilities changes. Adding or removing an unrelated device, such as an unused HDMI display, does not interrupt the active route. A system-default output change is also ignored while an available explicit output remains effective; it does rebuild a `System Default` route or an explicit-output fallback. Losing an explicit output, following a changed fallback, restoring the preferred output, or changing an active endpoint's rate, channel, alive, or buffer properties performs a complete stop, AUHAL disposal, Aggregate Device destruction, resolution, renegotiation, rebuild, and restart. A running Aggregate Device is never mutated in place.
+Device, default-device, alive/hot-plug, nominal-rate, buffer, and stream changes are monitored, and every change still refreshes the published CoreAudio inventory and hardware revision. Direct Routing rebuilds only when the effective input, output, channel layout, alive state, fallback state, or nominal rate changes. Connecting a non-default audio device while `System Default` still resolves to the same output does not rebuild the active route. The same applies to an unused HDMI display and to volatile buffer/capability metadata on a route that is already running. A system-default output change is also ignored while an available explicit output remains effective; it does rebuild a `System Default` route or an explicit-output fallback when the effective output actually changes.
+
+CoreAudio can briefly pause callbacks while macOS enumerates unrelated hardware. ScreamBar keeps the existing route open during that interruption, lets the preallocated FIFO recover, and checkpoints the cumulative stability counters after a short settling window. The raw counters remain available for diagnostics, but the already-observed interruption cannot permanently force Automatic from 64 to 128 or 256 frames. A new instability after recovery is still actionable. Losing an explicit output, following a changed fallback, restoring the preferred output, or changing an active endpoint's nominal rate, channels, or alive state performs a complete stop, AUHAL disposal, Aggregate Device destruction, resolution, renegotiation, rebuild, and restart. A running Aggregate Device is never mutated in place.
 
 ## Status and logs
 

@@ -1060,6 +1060,56 @@ final class AsyncSRCInfrastructureTests: XCTestCase {
         )
     }
 
+    func testStabilityCheckpointIgnoresOnlyPreviouslyObservedDisruptions() {
+        var rawMetrics = ScreamBarAsyncSRCMetrics()
+        rawMetrics.underrun_count = 2
+        rawMetrics.latency_ceiling_underrun_count = 2
+        rawMetrics.input_callback_deadline_miss_count = 1
+        let checkpointMetrics = AsyncSRCMetrics(rawMetrics)
+        let checkpoint = AsyncSRCStabilityCounters(metrics: checkpointMetrics)
+
+        XCTAssertTrue(
+            LegacyCoreAudioBackend.bufferEscalationReasons(
+                metrics: checkpointMetrics,
+                since: checkpoint
+            ).isEmpty
+        )
+
+        rawMetrics.underrun_count = 3
+        rawMetrics.latency_ceiling_underrun_count = 3
+        rawMetrics.input_callback_deadline_miss_count = 2
+        let newMetrics = AsyncSRCMetrics(rawMetrics)
+        XCTAssertEqual(
+            LegacyCoreAudioBackend.bufferEscalationReasons(
+                metrics: newMetrics,
+                since: checkpoint
+            ),
+            [
+                "FIFO underruns at latency ceiling: 1",
+                "callback execution exceeded its real-time deadline",
+            ]
+        )
+        XCTAssertEqual(
+            AsyncSRCStabilityCounters(metrics: newMetrics)
+                .subtracting(checkpoint)
+                .totalIncidentCount,
+            2
+        )
+    }
+
+    func testAnyRuntimeUnderrunIsAnActionableSensitivityIncident() {
+        var rawMetrics = ScreamBarAsyncSRCMetrics()
+        rawMetrics.underrun_count = 1
+
+        XCTAssertEqual(
+            LegacyCoreAudioBackend.bufferEscalationReasons(
+                metrics: AsyncSRCMetrics(rawMetrics),
+                since: .zero
+            ),
+            ["FIFO underruns: 1"]
+        )
+    }
+
     func testConvertedPlaythroughTopologyAndClientFormatAreDeterministic() {
         XCTAssertEqual(AsyncSRCPlaythroughTopology.inputElement, 1)
         XCTAssertEqual(AsyncSRCPlaythroughTopology.outputElement, 0)

@@ -47,6 +47,20 @@ struct AudioHardwareStreamFormat: Codable, Equatable, Sendable {
         "\(sampleRateDescription) Hz · \(channelCount) ch · \(sampleDescription)"
     }
 
+    /// A compact hardware description for the status UI.
+    ///
+    /// Float PCM is CoreAudio's normal client-facing representation and does
+    /// not help users diagnose a route, while an integer bit depth remains
+    /// useful for physical digital inputs such as S/PDIF receivers.
+    var compactStatusDescription: String {
+        let baseDescription = "\(sampleRateDescription) Hz · \(channelCount) ch"
+        guard formatID != kAudioFormatLinearPCM
+                || formatFlags & kAudioFormatFlagIsFloat == 0 else {
+            return baseDescription
+        }
+        return "\(baseDescription) · \(sampleDescription)"
+    }
+
     var diagnosticDescription: String {
         "ASBD(sampleRate: \(sampleRateDescription), channels: \(channelCount), formatID: '\(formatIDDescription)', flags: \(String(format: "0x%08X", formatFlags)), bits: \(bitsPerChannel), bytesPerFrame: \(bytesPerFrame), framesPerPacket: \(framesPerPacket), bytesPerPacket: \(bytesPerPacket))"
     }

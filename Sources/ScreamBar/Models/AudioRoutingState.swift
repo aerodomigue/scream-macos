@@ -49,12 +49,12 @@ struct EffectiveAudioRoute: Equatable, Sendable {
     }
 
     var inputPhysicalFormatStatusDescription: String {
-        input.primaryInputPhysicalStreamFormat?.statusDescription
+        input.primaryInputPhysicalStreamFormat?.compactStatusDescription
             ?? "\(Int(inputNominalSampleRate.rounded())) Hz · \(input.inputChannelCount) ch · physical format unavailable"
     }
 
     var outputPhysicalFormatStatusDescription: String {
-        output.primaryOutputPhysicalStreamFormat?.statusDescription
+        output.primaryOutputPhysicalStreamFormat?.compactStatusDescription
             ?? "\(Int(outputNominalSampleRate.rounded())) Hz · \(output.outputChannelCount) ch · physical format unavailable"
     }
 

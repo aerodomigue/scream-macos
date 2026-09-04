@@ -10,7 +10,13 @@ struct ScreamBarApp: App {
         MenuBarExtra {
             MenuBarView(viewModel: viewModel)
         } label: {
-            Image(systemName: viewModel.menuBarIcon)
+            HStack(spacing: 4) {
+                Image(systemName: viewModel.menuBarIcon)
+                if let statusText = viewModel.menuBarStatusText {
+                    Text(statusText)
+                        .monospacedDigit()
+                }
+            }
         }
         .menuBarExtraStyle(.window)
     }

@@ -16,6 +16,7 @@ final class AudioHardwareStreamFormatTests: XCTestCase {
         )
 
         XCTAssertEqual(format.statusDescription, "48000 Hz · 2 ch · 16-bit Integer")
+        XCTAssertEqual(format.compactStatusDescription, "48000 Hz · 2 ch · 16-bit Integer")
         XCTAssertTrue(format.diagnosticDescription.contains("formatID: 'lpcm'"))
         XCTAssertTrue(format.diagnosticDescription.contains("bits: 16"))
         XCTAssertTrue(format.diagnosticDescription.contains("bytesPerFrame: 4"))
@@ -34,5 +35,6 @@ final class AudioHardwareStreamFormatTests: XCTestCase {
         )
 
         XCTAssertEqual(format.statusDescription, "44100 Hz · 2 ch · Float32")
+        XCTAssertEqual(format.compactStatusDescription, "44100 Hz · 2 ch")
     }
 }

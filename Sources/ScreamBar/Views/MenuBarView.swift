@@ -38,6 +38,7 @@ struct MenuBarView: View {
                         applicationMode: $viewModel.applicationMode,
                         configuration: $viewModel.configuration,
                         directRoutingConfiguration: $viewModel.directRoutingConfiguration,
+                        menuBarDisplayConfiguration: $viewModel.menuBarDisplayConfiguration,
                         hotkeyService: viewModel.hotkeyService,
                         usbWatcherService: viewModel.usbWatcherService,
                         directRoutingService: viewModel.directRoutingService

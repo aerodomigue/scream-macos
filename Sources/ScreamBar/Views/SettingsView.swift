@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Binding var applicationMode: ApplicationMode
     @Binding var configuration: ScreamConfiguration
     @Binding var directRoutingConfiguration: DirectRoutingConfiguration
+    @Binding var menuBarDisplayConfiguration: MenuBarDisplayConfiguration
     @ObservedObject var hotkeyService: HotkeyService
     @ObservedObject var usbWatcherService: USBWatcherService
     @ObservedObject var directRoutingService: DirectAudioRoutingService
@@ -95,6 +96,20 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var commonSettings: some View {
+            Section("Menu Bar") {
+                Toggle(
+                    "Show frames",
+                    isOn: $menuBarDisplayConfiguration.showFrames
+                )
+                Toggle(
+                    "Show app latency",
+                    isOn: $menuBarDisplayConfiguration.showApplicationLatency
+                )
+                Text("Selected values appear beside the menu bar icon while Direct Routing is running.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Global Shortcut") {
                 Toggle("Enable shortcut", isOn: $hotkeyService.isEnabled)
 

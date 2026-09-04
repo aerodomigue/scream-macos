@@ -64,6 +64,12 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    @Published var menuBarDisplayConfiguration: MenuBarDisplayConfiguration {
+        didSet {
+            saveConfiguration()
+        }
+    }
+
     @Published var autoStart: Bool {
         didSet {
             UserDefaults.standard.set(autoStart, forKey: "autoStart")
@@ -118,6 +124,14 @@ final class AppViewModel: ObservableObject {
         return "speaker.fill"
     }
 
+    var menuBarStatusText: String? {
+        guard applicationMode == .directRouting else { return nil }
+        return MenuBarStatusDescription.make(
+            configuration: menuBarDisplayConfiguration,
+            routingState: directRoutingService.state
+        )
+    }
+
     init() {
         let store = logStore
         let settingsStore = ConfigurationStore(logStore: store)
@@ -127,6 +141,7 @@ final class AppViewModel: ObservableObject {
         self.configuration = appConfiguration.scream
         self.applicationMode = appConfiguration.mode
         self.directRoutingConfiguration = appConfiguration.directRouting
+        self.menuBarDisplayConfiguration = appConfiguration.menuBarDisplay
         self.autoStart = UserDefaults.standard.bool(forKey: "autoStart")
         self.jackService = JackService(logStore: store)
         self.screamService = ScreamService(logStore: store)
@@ -628,7 +643,8 @@ final class AppViewModel: ObservableObject {
             AppConfiguration(
                 mode: applicationMode,
                 scream: configuration,
-                directRouting: directRoutingConfiguration
+                directRouting: directRoutingConfiguration,
+                menuBarDisplay: menuBarDisplayConfiguration
             )
         )
     }

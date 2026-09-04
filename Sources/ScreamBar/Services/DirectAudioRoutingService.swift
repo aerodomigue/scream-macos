@@ -14,9 +14,6 @@ final class DirectAudioRoutingService: ObservableObject {
         let channelCount: Int
         let isAlive: Bool
         let currentNominalSampleRate: Double
-        let supportedNominalSampleRates: [NominalSampleRateRange]
-        let currentBufferFrameSize: UInt32?
-        let supportedBufferFrameSizeRange: AudioBufferFrameSizeRange?
     }
 
     private struct ActiveRouteHardwareSignature {
@@ -40,6 +37,8 @@ final class DirectAudioRoutingService: ObservableObject {
     }
 
     private static let sampleRateComparisonTolerance = 0.5
+    private static let hardwareInterruptionRecoveryNanoseconds: UInt64 =
+        2_000_000_000
 
     @Published private(set) var state: AudioRoutingState = .stopped
     @Published private(set) var desiredRunning = false
@@ -47,34 +46,54 @@ final class DirectAudioRoutingService: ObservableObject {
     let deviceService: CoreAudioDeviceService
 
     private let permissionService: any AudioInputPermissionServicing
+    private let hardwareInterruptionRecoverySleep: (UInt64) async throws -> Void
+    private let monotonicTimeProvider: () -> TimeInterval
     private weak var logStore: RollingLogStore?
     private var configuration = DirectRoutingConfiguration()
     private var activeRoute: PreparedAudioRoute?
     private var workerTask: Task<Void, Never>?
     private var latencyMonitorTask: Task<Void, Never>?
+    private var hardwareInterruptionRecoveryTask: Task<Void, Never>?
+    private var recoveringRouteSessionID: UUID?
     private var activeHardwareSignature: ActiveRouteHardwareSignature?
     private var automaticBufferOverride: UInt32?
     private var automaticBufferRouteIdentity: AutomaticBufferRouteIdentity?
+    private var automaticBufferEscalationGate = AutomaticBufferEscalationGate()
     private var desiredRevision: UInt64 = 0
     private(set) var isShuttingDown = false
 
     init(
         logStore: RollingLogStore,
         deviceService: CoreAudioDeviceService? = nil,
-        permissionService: (any AudioInputPermissionServicing)? = nil
+        permissionService: (any AudioInputPermissionServicing)? = nil,
+        hardwareInterruptionRecoverySleep: @escaping (UInt64) async throws -> Void = {
+            try await Task.sleep(nanoseconds: $0)
+        },
+        monotonicTimeProvider: @escaping () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        }
     ) {
         self.logStore = logStore
         self.deviceService = deviceService ?? CoreAudioDeviceService(logStore: logStore)
         self.permissionService = permissionService ?? AudioInputPermissionService()
+        self.hardwareInterruptionRecoverySleep =
+            hardwareInterruptionRecoverySleep
+        self.monotonicTimeProvider = monotonicTimeProvider
+        self.deviceService.onHardwareChangeObserved = { [weak self] in
+            guard let self, self.desiredRunning, self.activeRoute != nil else {
+                return
+            }
+            self.beginHardwareInterruptionRecovery()
+        }
         self.deviceService.onHardwareChanged = { [weak self] in
             guard let self, self.desiredRunning else { return }
-            self.discardAutomaticBufferOverrideIfRouteChanged()
             guard self.hardwareChangeRequiresReconciliation() else {
                 directRoutingLogger.debug(
-                    "Ignoring hardware revision \(self.deviceService.snapshot.revision): active Direct Routing endpoints and capabilities are unchanged"
+                    "Ignoring hardware revision \(self.deviceService.snapshot.revision): the effective Direct Routing stream contract is unchanged"
                 )
                 return
             }
+            self.discardAutomaticBufferOverrideIfRouteChanged()
             self.requestReconciliation(reason: "Direct Routing rebuilding after hardware change")
         }
     }
@@ -133,7 +152,28 @@ final class DirectAudioRoutingService: ObservableObject {
 
     func configurationDidChange(_ configuration: DirectRoutingConfiguration) {
         guard self.configuration != configuration else { return }
+        let routeConfigurationChanged =
+            self.configuration.inputSelection != configuration.inputSelection
+            || self.configuration.outputSelection != configuration.outputSelection
+            || self.configuration.bufferSize != configuration.bufferSize
+        let sensitivityChanged = self.configuration.automaticSensitivity
+            != configuration.automaticSensitivity
         self.configuration = configuration
+        automaticBufferEscalationGate.reset()
+        guard routeConfigurationChanged else {
+            if desiredRunning, sensitivityChanged,
+               configuration.bufferSize == .automatic {
+                if let sessionID = activeRoute?.sessionID {
+                    deviceService.checkpointRouteStability(
+                        sessionID: sessionID
+                    )
+                }
+                report(
+                    "Automatic buffer sensitivity changed to \(configuration.automaticSensitivity.label)"
+                )
+            }
+            return
+        }
         resetAutomaticBufferOverride()
         guard desiredRunning else { return }
         requestReconciliation(reason: "Direct Routing selection changed")
@@ -147,6 +187,7 @@ final class DirectAudioRoutingService: ObservableObject {
         workerTask?.cancel()
         latencyMonitorTask?.cancel()
         latencyMonitorTask = nil
+        cancelHardwareInterruptionRecovery()
         let task = workerTask
         await task?.value
         workerTask = nil
@@ -182,6 +223,8 @@ final class DirectAudioRoutingService: ObservableObject {
 
     private func requestReconciliation(reason: String) {
         guard !isShuttingDown else { return }
+        cancelHardwareInterruptionRecovery()
+        automaticBufferEscalationGate.reset()
         desiredRevision &+= 1
         let revision = desiredRevision
         let predecessor = workerTask
@@ -337,6 +380,7 @@ final class DirectAudioRoutingService: ObservableObject {
 
     private func startLatencyMonitor(for preparedRoute: PreparedAudioRoute) {
         latencyMonitorTask?.cancel()
+        automaticBufferEscalationGate.reset()
         latencyMonitorTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
@@ -358,7 +402,36 @@ final class DirectAudioRoutingService: ObservableObject {
                     return
                 }
 
-                if latency.requiresBufferEscalation {
+                let escalationEvaluation: AutomaticBufferEscalationEvaluation
+                if self.recoveringRouteSessionID == preparedRoute.sessionID {
+                    escalationEvaluation = AutomaticBufferEscalationEvaluation(
+                        shouldEscalate: false,
+                        newlyObservedIncidentCount: 0,
+                        recentIncidentCount: 0
+                    )
+                } else {
+                    let sensitivity = self.configuration.bufferSize == .automatic
+                        ? self.configuration.automaticSensitivity
+                        : .strict
+                    escalationEvaluation = self.automaticBufferEscalationGate
+                        .evaluate(
+                            sensitivity: sensitivity,
+                            routeRequiresEscalation:
+                                latency.requiresBufferEscalation,
+                            cumulativeIncidentCount:
+                                latency.bufferEscalationIncidentCount,
+                            monotonicTime: self.monotonicTimeProvider()
+                        )
+                    if sensitivity == .relaxed,
+                       escalationEvaluation.newlyObservedIncidentCount > 0,
+                       !escalationEvaluation.shouldEscalate {
+                        self.report(
+                            "Relaxed automatic buffer sensitivity tolerated \(escalationEvaluation.recentIncidentCount) of 3 incidents in 10 seconds"
+                        )
+                    }
+                }
+
+                if escalationEvaluation.shouldEscalate {
                     if self.configuration.bufferSize == .automatic,
                        let nextFrameCount = self.nextAutomaticBufferFrameSize(
                            after: self.activeRoute?.route.bufferFrameSize
@@ -495,6 +568,48 @@ final class DirectAudioRoutingService: ObservableObject {
         )
     }
 
+    private func beginHardwareInterruptionRecovery() {
+        guard let sessionID = activeRoute?.sessionID else { return }
+        hardwareInterruptionRecoveryTask?.cancel()
+        automaticBufferEscalationGate.reset()
+        recoveringRouteSessionID = sessionID
+        deviceService.checkpointRouteStability(sessionID: sessionID)
+        hardwareInterruptionRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.hardwareInterruptionRecoverySleep(
+                    Self.hardwareInterruptionRecoveryNanoseconds
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                self.report(
+                    "Direct Routing hardware recovery monitor failed: \(error.localizedDescription)"
+                )
+                self.recoveringRouteSessionID = nil
+                self.hardwareInterruptionRecoveryTask = nil
+                return
+            }
+            guard self.desiredRunning,
+                  self.activeRoute?.sessionID == sessionID else {
+                return
+            }
+            self.deviceService.checkpointRouteStability(sessionID: sessionID)
+            self.automaticBufferEscalationGate.reset()
+            self.recoveringRouteSessionID = nil
+            self.hardwareInterruptionRecoveryTask = nil
+            directRoutingLogger.debug(
+                "Direct Routing resumed stability monitoring after an unrelated CoreAudio hardware interruption"
+            )
+        }
+    }
+
+    private func cancelHardwareInterruptionRecovery() {
+        hardwareInterruptionRecoveryTask?.cancel()
+        hardwareInterruptionRecoveryTask = nil
+        recoveringRouteSessionID = nil
+    }
+
     private func makeActiveHardwareSignature(
         in snapshot: AudioHardwareSnapshot
     ) -> ActiveRouteHardwareSignature? {
@@ -523,18 +638,16 @@ final class DirectAudioRoutingService: ObservableObject {
         _ device: AudioDeviceDescriptor,
         channelCount: Int
     ) -> ActiveDeviceHardwareSignature {
+        // Buffer metadata and advertised capability ranges may change during an
+        // unrelated CoreAudio inventory update. They do not invalidate an
+        // already-running stream. Rebuild only when the effective stream
+        // contract itself changes; explicit buffer selections are reconciled
+        // through configurationDidChange(_:).
         ActiveDeviceHardwareSignature(
             uid: device.id,
             channelCount: channelCount,
             isAlive: device.isAlive,
-            currentNominalSampleRate: device.currentNominalSampleRate,
-            supportedNominalSampleRates:
-                NominalSampleRateNegotiator.normalizedRanges(
-                    device.supportedNominalSampleRates
-                ),
-            currentBufferFrameSize: device.currentBufferFrameSize,
-            supportedBufferFrameSizeRange:
-                device.supportedBufferFrameSizeRange
+            currentNominalSampleRate: device.currentNominalSampleRate
         )
     }
 
@@ -558,11 +671,6 @@ final class DirectAudioRoutingService: ObservableObject {
                 first.currentNominalSampleRate,
                 second.currentNominalSampleRate
             )
-            && first.supportedNominalSampleRates
-                == second.supportedNominalSampleRates
-            && first.currentBufferFrameSize == second.currentBufferFrameSize
-            && first.supportedBufferFrameSizeRange
-                == second.supportedBufferFrameSizeRange
     }
 
     private func effectiveOutputResolution(
@@ -710,7 +818,10 @@ final class DirectAudioRoutingService: ObservableObject {
         let effectiveTierDescription = route.bufferFrameSize.map {
             "\($0) frames"
         } ?? "system default"
-        return ", buffer policy: \(policyDescription), effective tier: \(effectiveTierDescription)"
+        let sensitivityDescription = configuration.bufferSize == .automatic
+            ? ", sensitivity: \(configuration.automaticSensitivity.label)"
+            : ""
+        return ", buffer policy: \(policyDescription), effective tier: \(effectiveTierDescription)\(sensitivityDescription)"
     }
 
     private func cleanupPreparedRoute(

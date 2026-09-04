@@ -3,14 +3,20 @@ import Foundation
 enum DirectRoutingBufferDescription {
     static func make(
         configuredSize: DirectRoutingBufferSize,
-        effectiveFrameCount: UInt32?
+        effectiveFrameCount: UInt32?,
+        automaticSensitivity: DirectRoutingAutomaticSensitivity? = nil
     ) -> String {
+        let automaticLabel = automaticSensitivity.map {
+            "Automatic \($0.label)"
+        } ?? "Automatic"
         guard let effectiveFrameCount else {
-            return configuredSize.label
+            return configuredSize == .automatic
+                ? automaticLabel
+                : configuredSize.label
         }
 
         if configuredSize == .automatic {
-            return "Automatic · \(effectiveFrameCount) frames active"
+            return "\(automaticLabel) · \(effectiveFrameCount) frames active"
         }
 
         guard configuredSize.frameCount != effectiveFrameCount else {
