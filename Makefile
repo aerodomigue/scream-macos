@@ -1,4 +1,5 @@
 APP_NAME := ScreamBar
+APP_VERSION := 1.1.0
 BUNDLE_ID := com.screambar.app
 BUILD_DIR := .build/release
 APP_BUNDLE := $(BUILD_DIR)/$(APP_NAME).app
@@ -80,8 +81,8 @@ build: ## Build release .app bundle
 	/usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $(APP_NAME)" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" $(APP_BUNDLE)/Contents/Info.plist
-	/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.0.0" $(APP_BUNDLE)/Contents/Info.plist
-	/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" $(APP_BUNDLE)/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $(APP_VERSION)" $(APP_BUNDLE)/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $(APP_VERSION)" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 13.0" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string ScreamBar needs audio input access for Direct Routing." $(APP_BUNDLE)/Contents/Info.plist
