@@ -86,6 +86,7 @@ build: ## Build release .app bundle
 	/usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 13.0" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" $(APP_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string ScreamBar needs audio input access for Direct Routing." $(APP_BUNDLE)/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string ScreamBar uses your local network to wake computers and securely request shutdown from Host Daemon." $(APP_BUNDLE)/Contents/Info.plist
 
 	@# Sign the completed bundle so macOS can associate TCC permissions with the app
 	codesign --force --deep -s - $(APP_BUNDLE)

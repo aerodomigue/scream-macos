@@ -14,7 +14,7 @@ enum WakeOnLANError: LocalizedError, Equatable {
         case .invalidMACAddress:
             return "Enter a valid 6-byte MAC address"
         case .invalidDestination:
-            return "Enter an IPv4 address or IPv4 subnet in CIDR notation"
+            return "Enter an IPv4 address with a subnet prefix from /0 to /30, e.g. 10.2.10.247/16"
         case .socketCreationFailed(let errorCode):
             return "Could not create the WOL socket (errno \(errorCode))"
         case .broadcastConfigurationFailed(let errorCode):

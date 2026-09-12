@@ -29,7 +29,8 @@ struct MenuBarView: View {
                 case .status:
                     if viewModel.applicationMode == .directRouting
                         || viewModel.jackService.isInstalled
-                        || viewModel.wakeOnLANConfiguration.isEnabled {
+                        || viewModel.wakeOnLANConfiguration.isEnabled
+                        || viewModel.daemonShutdownService.hasPendingAction {
                         StatusSectionView(viewModel: viewModel)
                     } else {
                         JackInstallGuideView()
@@ -41,10 +42,12 @@ struct MenuBarView: View {
                         directRoutingConfiguration: $viewModel.directRoutingConfiguration,
                         menuBarDisplayConfiguration: $viewModel.menuBarDisplayConfiguration,
                         wakeOnLANConfiguration: $viewModel.wakeOnLANConfiguration,
+                        daemonConnectionConfiguration: $viewModel.daemonConnectionConfiguration,
                         hotkeyService: viewModel.hotkeyService,
                         usbWatcherService: viewModel.usbWatcherService,
                         directRoutingService: viewModel.directRoutingService,
-                        wakeOnLANService: viewModel.wakeOnLANService
+                        wakeOnLANService: viewModel.wakeOnLANService,
+                        daemonShutdownService: viewModel.daemonShutdownService
                     )
                 case .logs:
                     LogView(logStore: viewModel.logStore)
@@ -74,9 +77,11 @@ struct MenuBarView: View {
         .frame(width: 380, height: 420)
         .onAppear {
             viewModel.wakeOnLANService.setInterfaceVisible(true)
+            viewModel.daemonShutdownService.setInterfaceVisible(true)
         }
         .onDisappear {
             viewModel.wakeOnLANService.setInterfaceVisible(false)
+            viewModel.daemonShutdownService.setInterfaceVisible(false)
         }
     }
 }

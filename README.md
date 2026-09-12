@@ -107,14 +107,13 @@ The controls common to both modes are:
 
 ### Wake on LAN
 
-Enable **Wake on LAN** in Settings, then enter the target machine's MAC address and either:
+Enable **Wake on LAN** in Settings, then enter the target machine's MAC address and its IPv4 address with a prefix, such as `10.2.10.247/16`. A subnet such as `10.2.0.0/16` can be used for broadcast-only waking.
 
-- its IPv4 address, such as `10.2.3.4`; or
-- its subnet in CIDR notation, such as `10.2.0.0/16`.
+ScreamBar sends six standard magic packets over UDP/9 to the directed broadcast address. It monitors an individual host with ICMP while the menu is visible. When the host is online, the Status action becomes **Shutdown**, using the Host Daemon HTTPS API after its trust bundle has been imported. A valid agent response also establishes reachability when ICMP is blocked.
 
-ScreamBar sends the standard 102-byte magic packet over UDP port 9. A CIDR target is converted to its directed broadcast address (`10.2.0.0/16` → `10.2.255.255`). When a machine IPv4 address is configured, ScreamBar checks it with ICMP ping while the menu window is visible. An online machine has a green status indicator and the send button is disabled. Closing the menu cancels monitoring, so ScreamBar does not generate background ping traffic. A subnet target cannot identify one machine to ping, so its reachability indicator remains unavailable and the send action stays available.
+Shutdown uses a 3-second countdown and offers cancellation before native dispatch. Pairing is required by default on new agent installations; per-client keys are stored in the macOS Keychain. Pending actions continue to be followed when the menu closes, and an accepted shutdown keeps the action blocked until a new agent instance is verified. USB triggers and keyboard shortcuts retain their existing WOL/audio behavior.
 
-The target network and machine firmware/operating system must allow Wake-on-LAN. Some routers block directed broadcasts, and a machine that blocks ICMP may appear offline even while running.
+See [Host Daemon setup, pairing and shutdown behavior](docs/host-daemon.md). The target network and machine firmware/operating system must support Wake-on-LAN; some routers block directed broadcasts.
 
 ### Scream
 

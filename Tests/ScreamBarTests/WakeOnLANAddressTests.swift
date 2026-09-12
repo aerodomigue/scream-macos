@@ -44,10 +44,10 @@ final class WakeOnLANAddressTests: XCTestCase {
         }
     }
 
-    func testHostDestinationIsUsedForSendingAndMonitoring() throws {
-        let destination = try WakeOnLANDestination("10.2.3.4")
+    func testHostDestinationUsesBroadcastForSendingAndHostForMonitoring() throws {
+        let destination = try WakeOnLANDestination("10.2.3.4/16")
 
-        XCTAssertEqual(destination.packetAddress.description, "10.2.3.4")
+        XCTAssertEqual(destination.packetAddress.description, "10.2.255.255")
         XCTAssertEqual(destination.monitoredHost?.description, "10.2.3.4")
     }
 
@@ -55,20 +55,15 @@ final class WakeOnLANAddressTests: XCTestCase {
         let destination = try WakeOnLANDestination("10.2.3.4/16")
 
         XCTAssertEqual(destination.packetAddress.description, "10.2.255.255")
-        XCTAssertNil(destination.monitoredHost)
-        XCTAssertEqual(
-            destination,
-            .subnet(
-                network: try IPv4Address("10.2.0.0"),
-                prefixLength: 16
-            )
-        )
+        XCTAssertEqual(destination.monitoredHost?.description, "10.2.3.4")
+        XCTAssertEqual(destination.address.description, "10.2.3.4")
+        XCTAssertEqual(destination.prefixLength, 16)
     }
 
     func testCIDREdgePrefixesAreCalculatedCorrectly() throws {
         XCTAssertEqual(
-            try WakeOnLANDestination("10.2.3.4/32").packetAddress.description,
-            "10.2.3.4"
+            try WakeOnLANDestination("10.2.3.5/30").packetAddress.description,
+            "10.2.3.7"
         )
         XCTAssertEqual(
             try WakeOnLANDestination("10.2.3.4/0").packetAddress.description,
@@ -77,7 +72,7 @@ final class WakeOnLANAddressTests: XCTestCase {
     }
 
     func testDestinationRejectsInvalidIPv4AndPrefix() {
-        for value in ["", "10.2.3", "10.2.3.256", "10.2.0.0/33", "host.local"] {
+        for value in ["", "10.2.3/16", "10.2.3.256/16", "10.2.0.0/33", "host.local", "10.2.3.4", "10.2.3.4/31", "10.2.3.4/32"] {
             XCTAssertThrowsError(try WakeOnLANDestination(value)) {
                 XCTAssertEqual($0 as? WakeOnLANError, .invalidDestination)
             }

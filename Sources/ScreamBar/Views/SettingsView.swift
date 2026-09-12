@@ -7,10 +7,12 @@ struct SettingsView: View {
     @Binding var directRoutingConfiguration: DirectRoutingConfiguration
     @Binding var menuBarDisplayConfiguration: MenuBarDisplayConfiguration
     @Binding var wakeOnLANConfiguration: WakeOnLANConfiguration
+    @Binding var daemonConnectionConfiguration: DaemonConnectionConfiguration
     @ObservedObject var hotkeyService: HotkeyService
     @ObservedObject var usbWatcherService: USBWatcherService
     @ObservedObject var directRoutingService: DirectAudioRoutingService
     @ObservedObject var wakeOnLANService: WakeOnLANService
+    @ObservedObject var daemonShutdownService: DaemonShutdownService
     @State private var showingDevicePicker = false
 
     var body: some View {
@@ -107,7 +109,7 @@ struct SettingsView: View {
                         text: $wakeOnLANConfiguration.macAddress
                     )
                     TextField(
-                        "Machine IPv4 or subnet",
+                        "Machine IPv4/prefix (10.2.10.247/16)",
                         text: $wakeOnLANConfiguration.destination
                     )
 
@@ -118,11 +120,28 @@ struct SettingsView: View {
                             .foregroundStyle(.red)
                     } else if let packetDestination =
                         wakeOnLANService.resolvedPacketDestinationDescription {
-                        Text("Magic packets will be sent over UDP/9 to \(packetDestination). Machine reachability is monitored only when a host IPv4 address is configured.")
+                        Text("Each request broadcasts \(WakeOnLANPacketBurstSender.packetCount) magic packets over UDP/9 to \(packetDestination).")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let monitoredHost = wakeOnLANService.monitoredHostDescription {
+                            Text("Reachability: ping \(monitoredHost).")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Enter the machine IP with its prefix to enable reachability monitoring.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
+            }
+
+            if wakeOnLANConfiguration.isEnabled {
+                DaemonSettingsView(
+                    trust: $daemonConnectionConfiguration.trust,
+                    host: wakeOnLANService.monitoredHostDescription,
+                    service: daemonShutdownService
+                )
             }
 
             Section("Menu Bar") {

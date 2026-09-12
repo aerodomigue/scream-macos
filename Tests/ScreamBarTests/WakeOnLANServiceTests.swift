@@ -23,6 +23,7 @@ final class WakeOnLANServiceTests: XCTestCase {
 
         await service.sendMagicPacket()
 
+        XCTAssertEqual(packetSender.sends.count, 6)
         let send = try XCTUnwrap(packetSender.sends.first)
         XCTAssertEqual(send.address.description, "10.2.255.255")
         XCTAssertEqual(send.port, 9)
@@ -31,7 +32,7 @@ final class WakeOnLANServiceTests: XCTestCase {
         XCTAssertTrue(
             logStore.entries.contains {
                 $0.source == .wol
-                    && $0.message == "Magic packet sent to 10.2.255.255:9"
+                    && $0.message == "6/6 magic packets sent to 10.2.255.255:9"
             }
         )
     }
@@ -153,7 +154,7 @@ final class WakeOnLANServiceTests: XCTestCase {
 
         XCTAssertEqual(
             service.lastError,
-            "Could not send the magic packet (errno 65)"
+            "0/6 magic packets sent to 10.2.255.255:9. Could not send the magic packet (errno 65)"
         )
         XCTAssertTrue(
             logStore.entries.contains {
@@ -166,7 +167,7 @@ final class WakeOnLANServiceTests: XCTestCase {
         WakeOnLANConfiguration(
             isEnabled: true,
             macAddress: "00:11:22:33:44:55",
-            destination: "10.2.3.4"
+            destination: "10.2.3.4/16"
         )
     }
 

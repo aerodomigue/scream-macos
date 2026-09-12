@@ -62,57 +62,40 @@ struct IPv4Address: Equatable, Hashable, Sendable, CustomStringConvertible {
     }
 }
 
-enum WakeOnLANDestination: Equatable, Sendable {
-    case host(IPv4Address)
-    case subnet(network: IPv4Address, prefixLength: UInt8)
+struct WakeOnLANDestination: Equatable, Sendable {
+    private static let maximumBroadcastPrefixLength: UInt8 = 30
+    private static let addressBitCount: UInt32 = 32
+
+    let address: IPv4Address
+    let prefixLength: UInt8
 
     init(_ value: String) throws {
-        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedValue.isEmpty else {
+        let components = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 2,
+              let prefixLength = UInt8(components[1]),
+              prefixLength <= Self.maximumBroadcastPrefixLength else {
             throw WakeOnLANError.invalidDestination
         }
-
-        let components = trimmedValue.split(
-            separator: "/",
-            omittingEmptySubsequences: false
-        )
-        switch components.count {
-        case 1:
-            self = .host(try IPv4Address(String(components[0])))
-        case 2:
-            guard let prefixLength = UInt8(components[1]), prefixLength <= 32 else {
-                throw WakeOnLANError.invalidDestination
-            }
-            let address = try IPv4Address(String(components[0]))
-            let mask = Self.mask(prefixLength: prefixLength)
-            self = .subnet(
-                network: IPv4Address(rawValue: address.rawValue & mask),
-                prefixLength: prefixLength
-            )
-        default:
-            throw WakeOnLANError.invalidDestination
-        }
+        address = try IPv4Address(String(components[0]))
+        self.prefixLength = prefixLength
     }
 
     var packetAddress: IPv4Address {
-        switch self {
-        case .host(let address):
-            return address
-        case .subnet(let network, let prefixLength):
-            return IPv4Address(
-                rawValue: network.rawValue | ~Self.mask(prefixLength: prefixLength)
-            )
-        }
+        IPv4Address(rawValue: address.rawValue | ~mask)
     }
 
     var monitoredHost: IPv4Address? {
-        guard case .host(let address) = self else { return nil }
+        let hostBits = address.rawValue & ~mask
+        // Retain broadcast-only network configurations without pinging a
+        // network or broadcast address as though it were an individual host.
+        guard hostBits != 0, hostBits != ~mask else { return nil }
         return address
     }
 
-    private static func mask(prefixLength: UInt8) -> UInt32 {
+    private var mask: UInt32 {
         guard prefixLength > 0 else { return 0 }
-        return UInt32.max << UInt32(32 - prefixLength)
+        return UInt32.max << (Self.addressBitCount - UInt32(prefixLength))
     }
 }
 

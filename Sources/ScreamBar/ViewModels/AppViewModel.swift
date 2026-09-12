@@ -21,6 +21,7 @@ final class AppViewModel: ObservableObject {
     let screamService: ScreamService
     let directRoutingService: DirectAudioRoutingService
     let wakeOnLANService: WakeOnLANService
+    let daemonShutdownService: DaemonShutdownService
     let audioModeCoordinator = AudioModeCoordinator()
     let hotkeyService = HotkeyService()
     let usbWatcherService = USBWatcherService()
@@ -76,6 +77,14 @@ final class AppViewModel: ObservableObject {
         didSet {
             saveConfiguration()
             wakeOnLANService.configurationDidChange(wakeOnLANConfiguration)
+            updateDaemonConnection()
+        }
+    }
+
+    @Published var daemonConnectionConfiguration: DaemonConnectionConfiguration {
+        didSet {
+            saveConfiguration()
+            updateDaemonConnection()
         }
     }
 
@@ -146,6 +155,7 @@ final class AppViewModel: ObservableObject {
         self.directRoutingConfiguration = appConfiguration.directRouting
         self.menuBarDisplayConfiguration = appConfiguration.menuBarDisplay
         self.wakeOnLANConfiguration = appConfiguration.wakeOnLAN
+        self.daemonConnectionConfiguration = appConfiguration.daemonConnection
         self.audioRuntimeState = appConfiguration.audioRuntimeState
         self.jackService = JackService(logStore: store)
         self.screamService = ScreamService(logStore: store)
@@ -153,6 +163,7 @@ final class AppViewModel: ObservableObject {
             logStore: store, diagnosticFile: RoutingDiagnosticFile()
         )
         self.wakeOnLANService = WakeOnLANService(logStore: store)
+        self.daemonShutdownService = DaemonShutdownService(logStore: store)
 
         launchAtLogin = SMAppService.mainApp.status == .enabled
 
@@ -192,6 +203,11 @@ final class AppViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        daemonShutdownService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
         audioModeCoordinator.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -226,6 +242,7 @@ final class AppViewModel: ObservableObject {
         setupApplicationActivationObserver()
         ApplicationTerminationController.shared.viewModel = self
         wakeOnLANService.configurationDidChange(wakeOnLANConfiguration)
+        updateDaemonConnection()
 
         restorePersistedAudioRuntimeState()
     }
@@ -776,8 +793,16 @@ final class AppViewModel: ObservableObject {
                 directRouting: directRoutingConfiguration,
                 menuBarDisplay: menuBarDisplayConfiguration,
                 wakeOnLAN: wakeOnLANConfiguration,
+                daemonConnection: daemonConnectionConfiguration,
                 audioRuntimeState: audioRuntimeState
             )
+        )
+    }
+
+    private func updateDaemonConnection() {
+        daemonShutdownService.configurationDidChange(
+            host: wakeOnLANService.monitoredHostDescription,
+            trust: daemonConnectionConfiguration.trust
         )
     }
 

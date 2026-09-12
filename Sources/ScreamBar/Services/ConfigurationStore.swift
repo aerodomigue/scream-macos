@@ -58,6 +58,7 @@ final class ConfigurationStore {
                         directRouting: configuration.directRouting,
                         menuBarDisplay: configuration.menuBarDisplay,
                         wakeOnLAN: configuration.wakeOnLAN,
+                        daemonConnection: configuration.daemonConnection,
                         audioRuntimeState: migratedRuntimeState
                     )
                     save(migratedConfiguration)

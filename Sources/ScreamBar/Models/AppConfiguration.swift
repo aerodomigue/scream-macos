@@ -1,7 +1,7 @@
 import Foundation
 
 struct AppConfiguration: Codable, Equatable {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
 
     let schemaVersion: Int
     var mode: ApplicationMode
@@ -9,6 +9,7 @@ struct AppConfiguration: Codable, Equatable {
     var directRouting: DirectRoutingConfiguration
     var menuBarDisplay: MenuBarDisplayConfiguration
     var wakeOnLAN: WakeOnLANConfiguration
+    var daemonConnection: DaemonConnectionConfiguration
     var audioRuntimeState: PersistedAudioRuntimeState
 
     private enum CodingKeys: String, CodingKey {
@@ -18,6 +19,7 @@ struct AppConfiguration: Codable, Equatable {
         case directRouting
         case menuBarDisplay
         case wakeOnLAN
+        case daemonConnection
         case audioRuntimeState
     }
 
@@ -29,6 +31,7 @@ struct AppConfiguration: Codable, Equatable {
         menuBarDisplay: MenuBarDisplayConfiguration =
             MenuBarDisplayConfiguration(),
         wakeOnLAN: WakeOnLANConfiguration = WakeOnLANConfiguration(),
+        daemonConnection: DaemonConnectionConfiguration = DaemonConnectionConfiguration(),
         audioRuntimeState: PersistedAudioRuntimeState =
             PersistedAudioRuntimeState()
     ) {
@@ -38,6 +41,7 @@ struct AppConfiguration: Codable, Equatable {
         self.directRouting = directRouting
         self.menuBarDisplay = menuBarDisplay
         self.wakeOnLAN = wakeOnLAN
+        self.daemonConnection = daemonConnection
         self.audioRuntimeState = audioRuntimeState
     }
 
@@ -58,6 +62,10 @@ struct AppConfiguration: Codable, Equatable {
             WakeOnLANConfiguration.self,
             forKey: .wakeOnLAN
         ) ?? WakeOnLANConfiguration()
+        daemonConnection = try container.decodeIfPresent(
+            DaemonConnectionConfiguration.self,
+            forKey: .daemonConnection
+        ) ?? DaemonConnectionConfiguration()
         audioRuntimeState = try container.decodeIfPresent(
             PersistedAudioRuntimeState.self,
             forKey: .audioRuntimeState
@@ -72,6 +80,7 @@ struct AppConfiguration: Codable, Equatable {
         try container.encode(directRouting, forKey: .directRouting)
         try container.encode(menuBarDisplay, forKey: .menuBarDisplay)
         try container.encode(wakeOnLAN, forKey: .wakeOnLAN)
+        try container.encode(daemonConnection, forKey: .daemonConnection)
         try container.encode(audioRuntimeState, forKey: .audioRuntimeState)
     }
 }

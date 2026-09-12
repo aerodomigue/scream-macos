@@ -11,9 +11,13 @@ struct StatusSectionView: View {
             } else {
                 directRoutingStatus
             }
-            if viewModel.wakeOnLANConfiguration.isEnabled {
+            if viewModel.wakeOnLANConfiguration.isEnabled || viewModel.daemonShutdownService.hasPendingAction {
                 Divider()
-                wakeOnLANStatus
+                WakeOnLANStatusView(
+                    wakeService: viewModel.wakeOnLANService,
+                    shutdownService: viewModel.daemonShutdownService,
+                    configuration: viewModel.wakeOnLANConfiguration
+                )
             }
             if let transitionError = viewModel.audioModeCoordinator.transitionError {
                 Text(transitionError.localizedDescription)
@@ -114,64 +118,6 @@ struct StatusSectionView: View {
             .padding(.horizontal, 4)
         }
         .padding(16)
-    }
-
-    private var wakeOnLANStatus: some View {
-        HStack {
-            Circle()
-                .fill(wakeOnLANStatusColor)
-                .frame(width: 10, height: 10)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Wake on LAN")
-                    .font(.headline)
-                Text(wakeOnLANStatusDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if let lastError = viewModel.wakeOnLANService.lastError {
-                    Text(lastError)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Spacer()
-
-            Button("Send Magic Packet") {
-                Task {
-                    await viewModel.wakeOnLANService.sendMagicPacket()
-                }
-            }
-            .disabled(!viewModel.wakeOnLANService.isMagicPacketSendEnabled)
-        }
-        .padding(16)
-    }
-
-    private var wakeOnLANStatusDescription: String {
-        let destination = viewModel.wakeOnLANConfiguration.destination
-        switch viewModel.wakeOnLANService.reachability {
-        case .online:
-            return "\(destination) is online"
-        case .offline:
-            return "\(destination) is offline"
-        case .checking:
-            return "Checking \(destination)…"
-        case .unavailable:
-            if viewModel.wakeOnLANService.configurationErrorDescription != nil {
-                return "Complete the WOL configuration in Settings"
-            }
-            return "Ready — reachability unavailable for subnet destinations"
-        }
-    }
-
-    private var wakeOnLANStatusColor: Color {
-        switch viewModel.wakeOnLANService.reachability {
-        case .online: return .green
-        case .offline: return .red
-        case .checking: return .yellow
-        case .unavailable: return .secondary
-        }
     }
 
     private var directRoutingDescription: String {
