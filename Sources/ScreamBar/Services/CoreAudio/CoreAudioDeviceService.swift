@@ -311,12 +311,26 @@ final class CoreAudioDeviceService: ObservableObject {
         }
     }
 
-    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency? {
-        backend.routeLatency(sessionID: sessionID)
+    func routeLatency(
+        sessionID: UUID,
+        ignoringHardwareInterruption: Bool = false
+    ) -> CoreAudioRouteLatency? {
+        backend.routeLatency(
+            sessionID: sessionID,
+            ignoringHardwareInterruption: ignoringHardwareInterruption
+        )
     }
 
-    func checkpointRouteStability(sessionID: UUID) {
-        backend.checkpointRouteStability(sessionID: sessionID)
+    func checkpointRouteStability(
+        sessionID: UUID,
+        scope: CoreAudioStabilityCheckpointScope = .all
+    ) {
+        backend.checkpointRouteStability(sessionID: sessionID, scope: scope)
+    }
+
+    @discardableResult
+    func setRouteHardwareRecovery(sessionID: UUID, active: Bool) -> UInt32? {
+        backend.setRouteHardwareRecovery(sessionID: sessionID, active: active)
     }
 
     func stopAndDestroyRoute(sessionID: UUID) throws {

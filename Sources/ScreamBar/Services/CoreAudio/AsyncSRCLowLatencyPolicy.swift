@@ -1,7 +1,7 @@
 import Foundation
 
 enum AsyncSRCLowLatencyPolicy {
-    static let preferredBufferFrameSizes: [UInt32] = [64, 128, 256, 512]
+    static let preferredBufferFrameSizes: [UInt32] = [16, 32, 64, 128, 256, 512]
 
     static func resolveBufferFrameSize(
         requestedFrameCount: UInt32?,

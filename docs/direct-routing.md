@@ -133,7 +133,7 @@ feedback, the FIFO would eventually underrun or overflow.
 The output callback samples FIFO occupancy and updates the Varispeed playback
 rate. The controller smooths fill error and rate changes, applies a dead band,
 and clamps correction to +/-0.15% (`0.0015`, or +/-1500 ppm). At automatic
-64- and 128-frame tiers it uses the faster adaptive controller. Larger
+16-, 32-, 64-, and 128-frame tiers it uses the faster adaptive controller. Larger
 256- and 512-frame tiers use a slower conservative controller intended as a
 last-resort stability mode.
 
@@ -147,7 +147,7 @@ For a converted route, `AsyncSRCLowLatencyPolicy` selects the first frame count
 supported by both devices from:
 
 ```text
-64 -> 128 -> 256 -> 512 frames
+16 -> 32 -> 64 -> 128 -> 256 -> 512 frames
 ```
 
 An explicit setting is validated on both devices. ScreamBar applies and reads
@@ -237,8 +237,12 @@ turns the following runtime conditions into buffer-escalation reasons:
 - a write above the FIFO latency ceiling, FIFO overflow, or dropped input;
 - FIFO resynchronization or an underrun after the target reached its ceiling;
 - input or output callback frame-limit violation;
-- a callback larger than the configured device quantum;
-- callback execution that reaches or exceeds its real-time frame deadline.
+
+Callback execution time and host-time gaps remain diagnostic telemetry. A
+wall-clock deadline miss alone cannot distinguish application work from macOS
+preemption, so it does not count as a conversion error or trigger escalation.
+Callback sizes larger than the requested quantum affect latency estimation;
+only exceeding the preallocated frame limit is an actionable buffer violation.
 
 Telemetry also records captured/rendered/priming frames, startup trims, current
 and maximum target/readable frames, callback sizes and gaps, maximum callback
@@ -291,8 +295,8 @@ ceiling-overflow or FIFO-overflow counter opens the episode. Changing
 sensitivity resets only the policy window and does not rebuild the running
 route.
 
-Once the threshold is reached, a 64-frame route can move to 128, then 256, then
-512. Unsupported tiers are skipped. A configuration-time buffer rejection
+Once the threshold is reached, a 16-frame route can move to 32, 64, 128, 256,
+then 512. Unsupported tiers are skipped. A configuration-time buffer rejection
 similarly tries the next tier.
 If no safer tier exists, or an explicit tier is unstable, Direct Routing stops
 with `latencyStabilityLimitExceeded` rather than looping forever.
@@ -331,12 +335,15 @@ preferred output is still present and effective.
 macOS can pause CoreAudio callbacks briefly while it enumerates unrelated
 hardware. For an inventory revision whose effective-route signature is
 unchanged, ScreamBar keeps the existing Audio Units open and starts a two-second
-recovery window. Runtime disruptions observed in that window remain in the raw
-soak telemetry, but a stability checkpoint prevents those cumulative counters
-from triggering a later buffer escalation. New errors after the checkpoint are
-still evaluated normally. Callback sizes larger than the requested hardware
-quantum affect the calculated latency but only an actual preallocated frame
-limit violation is an escalation reason.
+recovery window. Input AUHAL errors, FIFO underruns/overflows, dropped frames,
+and resynchronizations observed in that window remain in the raw telemetry,
+but are excluded from escalation. Selective checkpoints at the beginning and
+end prevent these transport effects from triggering a later escalation.
+Varispeed rendering errors, playback-rate parameter errors, and preallocated
+frame-limit violations remain actionable during the window and are never
+cleared by a hardware-interruption checkpoint. New transport incidents after
+the window are evaluated normally. This classification uses observed hardware
+events; an unexplained loss of audio is not silently attributed to macOS.
 
 A rebuild is still required when:
 
@@ -363,6 +370,38 @@ The old route is gone before the replacement is started. Listener cleanup for a
 device that has already disappeared is terminal and cannot block publication of
 the new snapshot. Other listener-removal failures remain registered for bounded
 retry.
+
+During a known CoreAudio hardware recovery window, the output callback holds
+the last FIFO target observed in an incident-free monitoring interval. It also
+restores that target if the hardware notification arrives after an underrun
+has already increased it. Previously needed reserve is preserved rather than
+unconditionally returning to the initial target. Normal target growth resumes
+when the recovery window ends, including when recovery is cancelled or fails.
+This changes neither the converter nor the FIFO contents: buffered audio drains
+through normal clock correction, and incident counters remain available.
+
+### Bounded diagnostic file
+
+The app writes routing events and incident telemetry to
+`~/Library/Logs/ScreamBar/routing-diagnostics.log`. It keeps one active file and
+two numbered archives, each capped at 1,000,000 bytes. Each entry is capped at
+8 KiB; the asynchronous writer accepts at most 16 pending entries and reports
+dropped entries after a backlog. A disk failure disables writing for that app
+session and reports the failure through unified logging.
+
+Detailed telemetry is emitted only for new incidents, at most once per 500 ms
+monitor poll, including transport incidents excluded during known hardware
+recovery. Callback arrival gaps use actual execution times, not audio sample
+timestamps. Interval maxima reset on each poll without resetting stability
+counters. FIFO peak, block sizes, callback counts, arrival gaps, elapsed execution
+and last arrival age describe the approximate interval; current FIFO target and
+rate correction describe the poll instant. Concurrent boundaries are approximate.
+There is no formatting, allocation or file writing in audio callbacks.
+
+Hardware recovery events are recorded for correlation. Long callback gaps or
+elapsed execution alone cannot identify macOS as responsible: elapsed execution
+includes preemption. Clearing the UI logs only clears the displayed history;
+the bounded diagnostic files remain available independently.
 
 ## Teardown and ownership
 

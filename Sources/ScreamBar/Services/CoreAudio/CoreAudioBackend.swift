@@ -1,5 +1,10 @@
 import Foundation
 
+enum CoreAudioStabilityCheckpointScope {
+    case all
+    case hardwareInterruption
+}
+
 @MainActor
 protocol CoreAudioBackend: AnyObject {
     var onHardwareChanged: (() -> Void)? { get set }
@@ -20,11 +25,30 @@ protocol CoreAudioBackend: AnyObject {
         validateOwnership: () throws -> Void
     ) throws -> UUID
     func startRoute(sessionID: UUID) throws
-    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency?
-    func checkpointRouteStability(sessionID: UUID)
+    func routeLatency(
+        sessionID: UUID,
+        ignoringHardwareInterruption: Bool
+    ) -> CoreAudioRouteLatency?
+    func checkpointRouteStability(
+        sessionID: UUID,
+        scope: CoreAudioStabilityCheckpointScope
+    )
+    func setRouteHardwareRecovery(sessionID: UUID, active: Bool) -> UInt32?
     func stopAndDestroyRoute(sessionID: UUID) -> [String]
     func verifyRouteResourcesReleased() -> [String]
     func shutdown() -> [String]
+}
+
+extension CoreAudioBackend {
+    func setRouteHardwareRecovery(sessionID: UUID, active: Bool) -> UInt32? { nil }
+
+    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency? {
+        routeLatency(sessionID: sessionID, ignoringHardwareInterruption: false)
+    }
+
+    func checkpointRouteStability(sessionID: UUID) {
+        checkpointRouteStability(sessionID: sessionID, scope: .all)
+    }
 }
 
 struct CoreAudioRouteLatency: Equatable, Sendable {
@@ -34,6 +58,7 @@ struct CoreAudioRouteLatency: Equatable, Sendable {
     let requiresBufferEscalation: Bool
     let bufferEscalationReason: String?
     let bufferEscalationIncidentCount: UInt64
+    let intervalDiagnosticDescription: String?
 
     init(
         estimatedApplicationSeconds: Double,
@@ -41,13 +66,15 @@ struct CoreAudioRouteLatency: Equatable, Sendable {
         isLowLatency: Bool,
         requiresBufferEscalation: Bool,
         bufferEscalationReason: String? = nil,
-        bufferEscalationIncidentCount: UInt64? = nil
+        bufferEscalationIncidentCount: UInt64? = nil,
+        intervalDiagnosticDescription: String? = nil
     ) {
         self.estimatedApplicationSeconds = estimatedApplicationSeconds
         self.maximumApplicationSeconds = maximumApplicationSeconds
         self.isLowLatency = isLowLatency
         self.requiresBufferEscalation = requiresBufferEscalation
         self.bufferEscalationReason = bufferEscalationReason
+        self.intervalDiagnosticDescription = intervalDiagnosticDescription
         self.bufferEscalationIncidentCount =
             bufferEscalationIncidentCount
                 ?? (requiresBufferEscalation ? 1 : 0)

@@ -1,10 +1,22 @@
 import Foundation
 
 struct LogEntry: Identifiable {
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
     let id = UUID()
     let timestamp: Date
     let source: LogSource
     let message: String
+
+    var formattedTimestamp: String {
+        Self.timestampFormatter.string(from: timestamp)
+    }
 
     enum LogSource: String, CaseIterable {
         case jack = "JACK"
@@ -41,6 +53,13 @@ final class RollingLogStore: ObservableObject {
 
     func entries(matching sources: Set<LogEntry.LogSource>) -> [LogEntry] {
         entries.filter { sources.contains($0.source) }
+    }
+
+    /// Formats the retained entries selected by the current source filters.
+    func text(matching sources: Set<LogEntry.LogSource>) -> String {
+        entries(matching: sources)
+            .map { "[\($0.formattedTimestamp)] [\($0.source.rawValue)] \($0.message)" }
+            .joined(separator: "\n")
     }
 
     private func trimIfNeeded() {

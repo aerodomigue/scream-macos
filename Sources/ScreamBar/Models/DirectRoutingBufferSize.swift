@@ -2,6 +2,8 @@ import Foundation
 
 enum DirectRoutingBufferSize: String, Codable, CaseIterable, Sendable {
     case automatic
+    case frames16
+    case frames32
     case frames64
     case frames128
     case frames256
@@ -13,6 +15,10 @@ enum DirectRoutingBufferSize: String, Codable, CaseIterable, Sendable {
         switch self {
         case .automatic:
             return nil
+        case .frames16:
+            return 16
+        case .frames32:
+            return 32
         case .frames64:
             return 64
         case .frames128:

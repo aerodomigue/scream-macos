@@ -164,8 +164,6 @@ struct AsyncSRCMetrics: Equatable, Sendable {
         inputRenderErrorCount > 0
             || outputRenderErrorCount > 0
             || rateParameterErrorCount > 0
-            || inputCallbackDeadlineMissCount > 0
-            || outputCallbackDeadlineMissCount > 0
             || telemetrySaturated
             || latencyCeilingOverflowCount > 0
             || inputCallbackFrameLimitExceededCount > 0
@@ -279,6 +277,9 @@ final class AsyncSRCPlaythrough: CoreAudioRouteTransport {
     private var inputSampleRate: Double = 0
     private var outputSampleRate: Double = 0
     private var configuredInputQuantumFrames: UInt32 = 0
+    private var lastDiagnosticPollUptime = ProcessInfo.processInfo.systemUptime
+    private var lastStableTargetFillFrames: UInt32 = 0
+    private var hardwareRecoveryActive = false
     private let audioUnitOperations: AsyncSRCAudioUnitOperations
 
     private init(
@@ -332,6 +333,34 @@ final class AsyncSRCPlaythrough: CoreAudioRouteTransport {
         var rawMetrics = ScreamBarAsyncSRCMetrics()
         audioUnitOperations.copyRenderMetrics(renderContext, &rawMetrics)
         return AsyncSRCMetrics(rawMetrics)
+    }
+
+    /// Consumes interval telemetry on the monitoring thread, outside audio callbacks.
+    func takeIntervalDiagnostics(metrics: AsyncSRCMetrics?, includeDescription: Bool) -> String? {
+        guard let renderContext else { return nil }
+        let now = ProcessInfo.processInfo.systemUptime
+        let intervalSeconds = now - lastDiagnosticPollUptime
+        lastDiagnosticPollUptime = now
+        var diagnostics = ScreamBarAsyncSRCDiagnostics()
+        ScreamBarAsyncSRCTakeDiagnostics(renderContext, &diagnostics)
+        guard includeDescription, let metrics else { return nil }
+        return AsyncSRCIntervalDiagnostics.describe(
+            diagnostics, metrics: metrics, intervalSeconds: intervalSeconds,
+            inputSampleRate: inputSampleRate, outputSampleRate: outputSampleRate
+        )
+    }
+
+    func recordStableTarget(metrics: AsyncSRCMetrics) {
+        guard !hardwareRecoveryActive else { return }
+        lastStableTargetFillFrames = metrics.targetFillFrames
+    }
+
+    @discardableResult
+    func setHardwareRecovery(active: Bool) -> UInt32? {
+        guard let renderContext else { return nil }
+        hardwareRecoveryActive = active
+        ScreamBarAsyncSRCSetHardwareRecovery(renderContext, lastStableTargetFillFrames, active)
+        return lastStableTargetFillFrames
     }
 
     var currentApplicationLatencySeconds: Double {
@@ -815,6 +844,7 @@ final class AsyncSRCPlaythrough: CoreAudioRouteTransport {
                 )
             }
             converterLatencySeconds = initializedConverterLatencySeconds
+            lastStableTargetFillFrames = activeBufferConfiguration.targetFillFrames
             estimatedApplicationLatencySeconds = measuredLatency.estimatedSeconds
             maximumApplicationLatencySeconds = measuredLatency.maximumSeconds
             isLowLatency = measuredLatency.isLowLatency

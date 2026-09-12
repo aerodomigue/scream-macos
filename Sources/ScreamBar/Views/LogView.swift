@@ -1,8 +1,7 @@
+import AppKit
 import SwiftUI
 
 struct LogView: View {
-    private static let sourceColumnWidth: CGFloat = 68
-
     @ObservedObject var logStore: RollingLogStore
     @State private var selectedSources = Set(LogEntry.LogSource.allCases)
 
@@ -47,6 +46,12 @@ struct LogView: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()
+                Button("Copy") {
+                    copyDisplayedLogs()
+                }
+                .font(.caption)
+                .disabled(filteredEntries.isEmpty)
+                .help("Copy all displayed logs")
                 Button("Clear") {
                     logStore.clear()
                 }
@@ -54,6 +59,16 @@ struct LogView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
+        }
+    }
+
+    private func copyDisplayedLogs() {
+        let displayedText = logStore.text(matching: selectedSources)
+        guard !displayedText.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        if !pasteboard.setString(displayedText, forType: .string) {
+            NSSound.beep()
         }
     }
 
@@ -104,13 +119,16 @@ struct LogView: View {
     }
 
     private func logEntryRow(_ entry: LogEntry) -> some View {
-        HStack(alignment: .top, spacing: 4) {
-            Text("[\(entry.source.rawValue)]")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(sourceColor(entry.source))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .frame(width: Self.sourceColumnWidth, alignment: .leading)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text("[\(entry.formattedTimestamp)]")
+                    .foregroundColor(.secondary)
+                Text("[\(entry.source.rawValue)]")
+                    .foregroundColor(sourceColor(entry.source))
+            }
+            .font(.system(size: 11, design: .monospaced))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
 
             Text(entry.message)
                 .font(.system(size: 11, design: .monospaced))

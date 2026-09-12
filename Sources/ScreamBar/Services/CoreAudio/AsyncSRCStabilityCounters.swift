@@ -145,10 +145,32 @@ struct AsyncSRCStabilityCounters: Equatable, Sendable {
             || outputCallbackDeadlineMissCount > 0
     }
 
+    /// Replaces transport effects while preserving converter and buffer-contract failures.
+    func replacingHardwareInterruptionCounters(
+        with observed: AsyncSRCStabilityCounters
+    ) -> AsyncSRCStabilityCounters {
+        AsyncSRCStabilityCounters(
+            inputRenderErrorCount: observed.inputRenderErrorCount,
+            outputRenderErrorCount: outputRenderErrorCount,
+            rateParameterErrorCount: rateParameterErrorCount,
+            latencyCeilingOverflowCount: observed.latencyCeilingOverflowCount,
+            inputCallbackFrameLimitExceededCount: inputCallbackFrameLimitExceededCount,
+            outputCallbackFrameLimitExceededCount: outputCallbackFrameLimitExceededCount,
+            underrunCount: observed.underrunCount,
+            overflowCount: observed.overflowCount,
+            resynchronizationCount: observed.resynchronizationCount,
+            droppedInputFrames: observed.droppedInputFrames,
+            latencyCeilingUnderrunCount: observed.latencyCeilingUnderrunCount,
+            inputCallbackDeadlineMissCount: observed.inputCallbackDeadlineMissCount,
+            outputCallbackDeadlineMissCount: observed.outputCallbackDeadlineMissCount
+        )
+    }
+
     var totalIncidentCount: UInt64 {
         // droppedInputFrames measures the volume lost, not the number of
         // incidents. Its associated ceiling-overflow or FIFO-overflow event is
-        // counted separately below.
+        // counted separately below. Wall-clock deadline misses remain telemetry:
+        // they cannot distinguish application work from macOS preemption.
         [
             inputRenderErrorCount,
             outputRenderErrorCount,
@@ -159,8 +181,6 @@ struct AsyncSRCStabilityCounters: Equatable, Sendable {
             underrunCount,
             overflowCount,
             resynchronizationCount,
-            inputCallbackDeadlineMissCount,
-            outputCallbackDeadlineMissCount,
         ].reduce(0) { partialCount, incidentCount in
             let (sum, overflow) = partialCount.addingReportingOverflow(
                 incidentCount

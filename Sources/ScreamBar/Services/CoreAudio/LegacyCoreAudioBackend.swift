@@ -129,6 +129,7 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         var playthrough: (any CoreAudioRouteTransport)?
         var bufferFrameSizeRestores: [BufferFrameSizeRestore]
         var stabilityCheckpoint = AsyncSRCStabilityCounters.zero
+        var lastDiagnosticCounters = AsyncSRCStabilityCounters.zero
         var didPublishFinalAsyncSRCMetrics = false
 
         init(
@@ -536,7 +537,10 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             .converterLatencySeconds
     }
 
-    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency? {
+    func routeLatency(
+        sessionID: UUID,
+        ignoringHardwareInterruption: Bool = false
+    ) -> CoreAudioRouteLatency? {
         guard let resources = routes[sessionID],
               let playthrough = resources.playthrough else { return nil }
         guard let convertedPlaythrough = playthrough as? AsyncSRCPlaythrough else {
@@ -548,16 +552,26 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             )
         }
         let metrics = convertedPlaythrough.metrics
-        let stabilityCounters = metrics.map {
+        let currentDiagnosticCounters = metrics.map {
+            AsyncSRCStabilityCounters(metrics: $0)
+        } ?? .zero
+        let diagnosticCounters = currentDiagnosticCounters.subtracting(resources.lastDiagnosticCounters)
+        let hasNewDiagnosticIncident = diagnosticCounters.totalIncidentCount > 0
+        resources.lastDiagnosticCounters = currentDiagnosticCounters
+        if !hasNewDiagnosticIncident, !ignoringHardwareInterruption, let metrics {
+            convertedPlaythrough.recordStableTarget(metrics: metrics)
+        }
+        let observedCounters = metrics.map {
             AsyncSRCStabilityCounters(metrics: $0)
                 .subtracting(resources.stabilityCheckpoint)
         } ?? .zero
-        let escalationReasons = metrics.map {
-            Self.bufferEscalationReasons(
-                metrics: $0,
-                since: resources.stabilityCheckpoint
-            )
-        } ?? []
+        let stabilityCounters = ignoringHardwareInterruption
+            ? observedCounters.replacingHardwareInterruptionCounters(with: .zero)
+            : observedCounters
+        let escalationReasons = Self.bufferEscalationReasons(
+            counters: stabilityCounters,
+            callbackExceededConfiguredQuantum: false
+        )
         return CoreAudioRouteLatency(
             estimatedApplicationSeconds:
                 convertedPlaythrough.currentApplicationLatencySeconds,
@@ -569,20 +583,44 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
                 ? nil
                 : escalationReasons.joined(separator: ", "),
             bufferEscalationIncidentCount:
-                stabilityCounters.totalIncidentCount
+                stabilityCounters.totalIncidentCount,
+            intervalDiagnosticDescription: convertedPlaythrough.takeIntervalDiagnostics(
+                metrics: metrics, includeDescription: hasNewDiagnosticIncident
+            ).map { description in
+                let reasons = Self.bufferEscalationReasons(
+                    counters: diagnosticCounters, callbackExceededConfiguredQuantum: false
+                ).joined(separator: ", ")
+                let context = ignoringHardwareInterruption
+                    ? "known CoreAudio recovery active; transport counters excluded from escalation"
+                    : "normal monitoring"
+                return "SRC incident context: \(context); interval incidents: \(reasons)\n\(description)"
+            }
         )
     }
 
-    func checkpointRouteStability(sessionID: UUID) {
+    func checkpointRouteStability(
+        sessionID: UUID,
+        scope: CoreAudioStabilityCheckpointScope = .all
+    ) {
         guard let resources = routes[sessionID],
               let convertedPlaythrough = resources.playthrough
                 as? AsyncSRCPlaythrough,
               let metrics = convertedPlaythrough.metrics else {
             return
         }
-        resources.stabilityCheckpoint = AsyncSRCStabilityCounters(
-            metrics: metrics
-        )
+        let observedCounters = AsyncSRCStabilityCounters(metrics: metrics)
+        switch scope {
+        case .all:
+            resources.stabilityCheckpoint = observedCounters
+        case .hardwareInterruption:
+            resources.stabilityCheckpoint = resources.stabilityCheckpoint
+                .replacingHardwareInterruptionCounters(with: observedCounters)
+        }
+    }
+
+    func setRouteHardwareRecovery(sessionID: UUID, active: Bool) -> UInt32? {
+        (routes[sessionID]?.playthrough as? AsyncSRCPlaythrough)?
+            .setHardwareRecovery(active: active)
     }
 
     nonisolated static func bufferEscalationReasons(
@@ -593,40 +631,34 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
             .subtracting(checkpoint)
         return bufferEscalationReasons(
             counters: counters,
-            callbackExceededConfiguredQuantum: false,
-            missedCallbackDeadline: counters.hasMissedCallbackDeadline
+            callbackExceededConfiguredQuantum: false
         )
     }
 
     nonisolated static func requiresBufferEscalation(
         metrics: AsyncSRCMetrics,
-        callbackExceededConfiguredQuantum: Bool,
-        missedCallbackDeadline: Bool
+        callbackExceededConfiguredQuantum: Bool
     ) -> Bool {
         !bufferEscalationReasons(
             metrics: metrics,
-            callbackExceededConfiguredQuantum: callbackExceededConfiguredQuantum,
-            missedCallbackDeadline: missedCallbackDeadline
+            callbackExceededConfiguredQuantum: callbackExceededConfiguredQuantum
         ).isEmpty
     }
 
     nonisolated static func bufferEscalationReasons(
         metrics: AsyncSRCMetrics,
-        callbackExceededConfiguredQuantum: Bool,
-        missedCallbackDeadline: Bool
+        callbackExceededConfiguredQuantum: Bool
     ) -> [String] {
         bufferEscalationReasons(
             counters: AsyncSRCStabilityCounters(metrics: metrics),
             callbackExceededConfiguredQuantum:
-                callbackExceededConfiguredQuantum,
-            missedCallbackDeadline: missedCallbackDeadline
+                callbackExceededConfiguredQuantum
         )
     }
 
     private nonisolated static func bufferEscalationReasons(
         counters: AsyncSRCStabilityCounters,
-        callbackExceededConfiguredQuantum: Bool,
-        missedCallbackDeadline: Bool
+        callbackExceededConfiguredQuantum: Bool
     ) -> [String] {
         var reasons: [String] = []
         if counters.inputRenderErrorCount > 0 {
@@ -671,9 +703,6 @@ final class LegacyCoreAudioBackend: CoreAudioBackend {
         }
         if callbackExceededConfiguredQuantum {
             reasons.append("callback exceeded the configured frame quantum")
-        }
-        if missedCallbackDeadline {
-            reasons.append("callback execution exceeded its real-time deadline")
         }
         return reasons
     }

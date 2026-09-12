@@ -2220,6 +2220,7 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
     var prepareRouteErrors: [Error] = []
     var rebuildListenersErrors: [Error] = []
     var routeLatencyValue: CoreAudioRouteLatency?
+    var hardwareInterruptionLatencyValue: CoreAudioRouteLatency?
     var routeLatencyProvider: ((UUID) -> CoreAudioRouteLatency?)?
     private var rates: [AudioDeviceUID: Double]
 
@@ -2331,11 +2332,26 @@ private final class CoreAudioBackendSpy: CoreAudioBackend {
         }
     }
 
-    func routeLatency(sessionID: UUID) -> CoreAudioRouteLatency? {
-        routeLatencyProvider?(sessionID) ?? routeLatencyValue
+    func routeLatency(
+        sessionID: UUID,
+        ignoringHardwareInterruption: Bool
+    ) -> CoreAudioRouteLatency? {
+        let latency = routeLatencyProvider?(sessionID) ?? routeLatencyValue
+        guard ignoringHardwareInterruption else { return latency }
+        return hardwareInterruptionLatencyValue ?? latency.map {
+            CoreAudioRouteLatency(
+                estimatedApplicationSeconds: $0.estimatedApplicationSeconds,
+                maximumApplicationSeconds: $0.maximumApplicationSeconds,
+                isLowLatency: $0.isLowLatency,
+                requiresBufferEscalation: false
+            )
+        }
     }
 
-    func checkpointRouteStability(sessionID: UUID) {
+    func checkpointRouteStability(
+        sessionID: UUID,
+        scope: CoreAudioStabilityCheckpointScope
+    ) {
         stabilityCheckpointSessionIDs.append(sessionID)
         onStabilityCheckpoint?()
     }

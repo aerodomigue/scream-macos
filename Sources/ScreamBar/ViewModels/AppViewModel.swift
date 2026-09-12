@@ -149,7 +149,9 @@ final class AppViewModel: ObservableObject {
         self.audioRuntimeState = appConfiguration.audioRuntimeState
         self.jackService = JackService(logStore: store)
         self.screamService = ScreamService(logStore: store)
-        self.directRoutingService = DirectAudioRoutingService(logStore: store)
+        self.directRoutingService = DirectAudioRoutingService(
+            logStore: store, diagnosticFile: RoutingDiagnosticFile()
+        )
         self.wakeOnLANService = WakeOnLANService(logStore: store)
 
         launchAtLogin = SMAppService.mainApp.status == .enabled

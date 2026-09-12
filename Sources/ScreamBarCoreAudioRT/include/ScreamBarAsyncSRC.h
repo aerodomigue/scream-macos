@@ -12,6 +12,38 @@ extern "C" {
 typedef struct ScreamBarAsyncSRCClockController ScreamBarAsyncSRCClockController;
 typedef struct ScreamBarAsyncSRCContext ScreamBarAsyncSRCContext;
 
+/* Applied by the output callback. Keeps FIFO adaptation at the pre-interruption
+ * target during known hardware recovery, then restores normal adaptation.
+ * Does not discard audio, reset the converter, or clear incident counters. */
+void ScreamBarAsyncSRCSetHardwareRecovery(
+    ScreamBarAsyncSRCContext * _Nonnull context,
+    uint32_t previous_target_frames,
+    bool active
+);
+
+typedef struct {
+    uint64_t maximum_arrival_gap;
+    uint64_t maximum_execution_time;
+    uint64_t last_arrival_age;
+    uint64_t callback_count;
+    uint32_t maximum_frames;
+} ScreamBarAsyncSRCCallbackDiagnostics;
+
+typedef struct {
+    ScreamBarAsyncSRCCallbackDiagnostics input;
+    ScreamBarAsyncSRCCallbackDiagnostics output;
+    uint32_t maximum_fifo_frames;
+    uint32_t ceiling_frames;
+} ScreamBarAsyncSRCDiagnostics;
+
+/* Single monitoring consumer. Resets interval maxima/counts, never stability
+ * counters. Fields are approximate across concurrent callback boundaries.
+ * Durations use host ticks; arrivals measure execution, not audio timestamps. */
+void ScreamBarAsyncSRCTakeDiagnostics(
+    ScreamBarAsyncSRCContext * _Nonnull context,
+    ScreamBarAsyncSRCDiagnostics * _Nonnull diagnostics
+);
+
 typedef OSStatus (*ScreamBarAsyncSRCInputRenderProc)(
     void * _Nullable render_context,
     AudioUnitRenderActionFlags * _Nonnull action_flags,

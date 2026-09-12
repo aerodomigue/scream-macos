@@ -36,6 +36,8 @@ static const uint32_t SCREAM_BAR_SOURCE_FRAME_MARGIN = 64;
 static const uint32_t SCREAM_BAR_LOW_WATER_GUARD_DIVISOR = 4;
 static const uint32_t SCREAM_BAR_TARGET_GROWTH_DIVISOR = 2;
 static const uint32_t SCREAM_BAR_TELEMETRY_PUBLISH_INTERVAL = 64;
+static const uint64_t SCREAM_BAR_HARDWARE_RECOVERY_ACTIVE_FLAG = UINT64_C(1) << 32;
+static const uint64_t SCREAM_BAR_HARDWARE_RECOVERY_GENERATION_STEP = UINT64_C(1) << 33;
 
 struct ScreamBarAsyncSRCClockController {
     double averaged_fill_error_frames;
@@ -49,7 +51,22 @@ struct ScreamBarAsyncSRCClockController {
     bool playback_rate_locked;
 };
 
+typedef struct {
+    _Atomic uint_fast64_t last_arrival_host_time;
+    _Atomic uint_fast64_t maximum_arrival_gap;
+    _Atomic uint_fast64_t maximum_execution_time;
+    _Atomic uint_fast32_t maximum_frames;
+    _Atomic uint_fast64_t callback_count;
+} ScreamBarCallbackDiagnosticState;
+
 struct ScreamBarAsyncSRCContext {
+    ScreamBarCallbackDiagnosticState input_diagnostics;
+    ScreamBarCallbackDiagnosticState output_diagnostics;
+    _Atomic uint_fast32_t diagnostic_maximum_fifo_frames;
+    _Atomic uint_fast64_t hardware_recovery_request;
+    uint64_t applied_hardware_recovery_request;
+    bool hardware_recovery_active;
+
     AudioUnit input_audio_unit;
     AudioUnit varispeed_audio_unit;
     ScreamBarAsyncSRCInputRenderProc input_render_proc;
@@ -138,6 +155,49 @@ struct ScreamBarAsyncSRCContext {
 
 static double ScreamBarClamp(double value, double minimum, double maximum) {
     return fmin(fmax(value, minimum), maximum);
+}
+
+void ScreamBarAsyncSRCSetHardwareRecovery(
+    ScreamBarAsyncSRCContext *context,
+    uint32_t previous_target_frames,
+    bool active
+) {
+    if (context == NULL) { return; }
+    const uint32_t minimum_target = context->initial_target_fill_frames;
+    const uint32_t maximum_target = context->maximum_target_fill_frames;
+    const uint32_t bounded_target = previous_target_frames < minimum_target
+        ? minimum_target
+        : (previous_target_frames > maximum_target ? maximum_target : previous_target_frames);
+    const uint64_t previous_request = atomic_load_explicit(
+        &context->hardware_recovery_request, memory_order_relaxed
+    );
+    const uint64_t generation =
+        (previous_request + SCREAM_BAR_HARDWARE_RECOVERY_GENERATION_STEP)
+            & ~(SCREAM_BAR_HARDWARE_RECOVERY_GENERATION_STEP - 1);
+    const uint64_t request = generation | bounded_target
+        | (active ? SCREAM_BAR_HARDWARE_RECOVERY_ACTIVE_FLAG : 0);
+    atomic_store_explicit(&context->hardware_recovery_request, request, memory_order_release);
+}
+
+/* Only the output callback mutates controller and adaptation state. A packed
+ * command also preserves restoration if begin/end both occur while IO is paused. */
+static void ScreamBarApplyHardwareRecovery(ScreamBarAsyncSRCContext *context) {
+    const uint64_t request = atomic_load_explicit(
+        &context->hardware_recovery_request, memory_order_acquire
+    );
+    if (request == context->applied_hardware_recovery_request) { return; }
+    context->applied_hardware_recovery_request = request;
+    context->hardware_recovery_active =
+        (request & SCREAM_BAR_HARDWARE_RECOVERY_ACTIVE_FLAG) != 0;
+    const uint32_t previous_target = (uint32_t)request;
+    const uint32_t current_target = (uint32_t)atomic_load_explicit(
+        &context->target_fill_frames, memory_order_relaxed
+    );
+    if (previous_target != current_target) {
+        atomic_store_explicit(&context->target_fill_frames, previous_target, memory_order_relaxed);
+        ScreamBarAsyncSRCClockControllerReset(context->clock_controller);
+    }
+    context->stable_output_frames = 0;
 }
 
 static uint_fast64_t ScreamBarDoubleBits(double value) {
@@ -416,6 +476,68 @@ static void ScreamBarStoreMaximum64(
     }
 }
 
+static void ScreamBarInitializeCallbackDiagnostics(
+    ScreamBarCallbackDiagnosticState *diagnostics
+) {
+    atomic_init(&diagnostics->last_arrival_host_time, 0);
+    atomic_init(&diagnostics->maximum_arrival_gap, 0);
+    atomic_init(&diagnostics->maximum_execution_time, 0);
+    atomic_init(&diagnostics->maximum_frames, 0);
+    atomic_init(&diagnostics->callback_count, 0);
+}
+
+static void ScreamBarRecordDiagnosticArrival(
+    ScreamBarCallbackDiagnosticState *diagnostics,
+    uint64_t arrival_host_time,
+    uint32_t frame_count
+) {
+    const uint64_t previous = atomic_exchange_explicit(
+        &diagnostics->last_arrival_host_time, arrival_host_time, memory_order_relaxed
+    );
+    if (previous > 0 && arrival_host_time > previous) {
+        ScreamBarStoreMaximum64(
+            &diagnostics->maximum_arrival_gap, arrival_host_time - previous
+        );
+    }
+    ScreamBarStoreMaximum(&diagnostics->maximum_frames, frame_count);
+    atomic_fetch_add_explicit(&diagnostics->callback_count, 1, memory_order_relaxed);
+}
+
+static ScreamBarAsyncSRCCallbackDiagnostics ScreamBarTakeCallbackDiagnostics(
+    ScreamBarCallbackDiagnosticState *diagnostics,
+    uint64_t now
+) {
+    const uint64_t last_arrival = atomic_load_explicit(
+        &diagnostics->last_arrival_host_time, memory_order_relaxed
+    );
+    return (ScreamBarAsyncSRCCallbackDiagnostics) {
+        .maximum_arrival_gap = atomic_exchange_explicit(
+            &diagnostics->maximum_arrival_gap, 0, memory_order_relaxed),
+        .maximum_execution_time = atomic_exchange_explicit(
+            &diagnostics->maximum_execution_time, 0, memory_order_relaxed),
+        .maximum_frames = (uint32_t)atomic_exchange_explicit(
+            &diagnostics->maximum_frames, 0, memory_order_relaxed),
+        .callback_count = atomic_exchange_explicit(
+            &diagnostics->callback_count, 0, memory_order_relaxed),
+        .last_arrival_age = last_arrival > 0 && now >= last_arrival
+            ? now - last_arrival : 0
+    };
+}
+
+void ScreamBarAsyncSRCTakeDiagnostics(
+    ScreamBarAsyncSRCContext *context,
+    ScreamBarAsyncSRCDiagnostics *diagnostics
+) {
+    if (context == NULL || diagnostics == NULL) { return; }
+    const uint64_t now = AudioGetCurrentHostTime();
+    diagnostics->input = ScreamBarTakeCallbackDiagnostics(&context->input_diagnostics, now);
+    diagnostics->output = ScreamBarTakeCallbackDiagnostics(&context->output_diagnostics, now);
+    diagnostics->maximum_fifo_frames = (uint32_t)atomic_exchange_explicit(
+        &context->diagnostic_maximum_fifo_frames, 0, memory_order_relaxed
+    );
+    diagnostics->ceiling_frames = context->maximum_readable_frames;
+}
+
 static void ScreamBarRecordCallbackHostTime(
     const AudioTimeStamp *timestamp,
     _Atomic uint_fast64_t *last_callback_host_time,
@@ -443,11 +565,14 @@ static void ScreamBarRecordCallbackExecutionTime(
     uint32_t frame_count,
     double deadline_host_ticks_per_frame,
     _Atomic uint_fast64_t *maximum_execution_host_time,
-    _Atomic uint_fast64_t *deadline_miss_count
+    _Atomic uint_fast64_t *deadline_miss_count,
+    ScreamBarCallbackDiagnosticState *diagnostics
 ) {
     const uint64_t end_host_time = AudioGetCurrentHostTime();
     if (end_host_time >= start_host_time) {
         const uint64_t execution_host_time = end_host_time - start_host_time;
+        ScreamBarStoreMaximum64(&diagnostics->maximum_execution_time, execution_host_time);
+
         ScreamBarStoreMaximum64(
             maximum_execution_host_time,
             execution_host_time
@@ -796,6 +921,10 @@ static ScreamBarAsyncSRCContext *ScreamBarAsyncSRCContextCreateInternal(
             maximum_input_frames * sizeof(Float32);
     }
 
+    ScreamBarInitializeCallbackDiagnostics(&context->input_diagnostics);
+    ScreamBarInitializeCallbackDiagnostics(&context->output_diagnostics);
+    atomic_init(&context->diagnostic_maximum_fifo_frames, 0);
+    atomic_init(&context->hardware_recovery_request, 0);
     atomic_init(&context->primed, false);
     atomic_init(&context->captured_frames, 0);
     atomic_init(&context->rendered_frames, 0);
@@ -1124,6 +1253,7 @@ OSStatus ScreamBarAsyncSRCInputCallback(
         return kAudio_ParamError;
     }
     const uint64_t callback_start_host_time = AudioGetCurrentHostTime();
+    ScreamBarRecordDiagnosticArrival(&context->input_diagnostics, callback_start_host_time, frame_count);
     ScreamBarRecordCallbackHostTime(
         timestamp,
         &context->last_input_callback_host_time,
@@ -1135,7 +1265,8 @@ OSStatus ScreamBarAsyncSRCInputCallback(
             frame_count,
             context->input_callback_deadline_host_ticks_per_frame,
             &context->maximum_input_callback_execution_host_time,
-            &context->input_callback_deadline_miss_count
+            &context->input_callback_deadline_miss_count,
+            &context->input_diagnostics
         );
         return kAudio_ParamError;
     }
@@ -1150,7 +1281,8 @@ OSStatus ScreamBarAsyncSRCInputCallback(
             frame_count,
             context->input_callback_deadline_host_ticks_per_frame,
             &context->maximum_input_callback_execution_host_time,
-            &context->input_callback_deadline_miss_count
+            &context->input_callback_deadline_miss_count,
+            &context->input_diagnostics
         );
         return kAudio_ParamError;
     }
@@ -1190,7 +1322,8 @@ OSStatus ScreamBarAsyncSRCInputCallback(
             frame_count,
             context->input_callback_deadline_host_ticks_per_frame,
             &context->maximum_input_callback_execution_host_time,
-            &context->input_callback_deadline_miss_count
+            &context->input_callback_deadline_miss_count,
+            &context->input_diagnostics
         );
         return noErr;
     }
@@ -1216,6 +1349,9 @@ OSStatus ScreamBarAsyncSRCInputCallback(
         written_frames,
         memory_order_relaxed
     );
+    ScreamBarStoreMaximum(
+        &context->diagnostic_maximum_fifo_frames, readable_before_input + written_frames
+    );
     if (frames_to_write < frame_count) {
         atomic_fetch_add_explicit(
             &context->latency_ceiling_overflow_count,
@@ -1238,7 +1374,8 @@ OSStatus ScreamBarAsyncSRCInputCallback(
         frame_count,
         context->input_callback_deadline_host_ticks_per_frame,
         &context->maximum_input_callback_execution_host_time,
-        &context->input_callback_deadline_miss_count
+        &context->input_callback_deadline_miss_count,
+        &context->input_diagnostics
     );
     return noErr;
 }
@@ -1335,11 +1472,13 @@ OSStatus ScreamBarAsyncSRCSourceCallback(
         const uint32_t increased_target = recovery_step >= remaining_target_capacity
             ? maximum_target
             : current_target + recovery_step;
-        atomic_store_explicit(
-            &context->target_fill_frames,
-            increased_target,
-            memory_order_relaxed
-        );
+        if (!context->hardware_recovery_active) {
+            atomic_store_explicit(
+                &context->target_fill_frames,
+                increased_target,
+                memory_order_relaxed
+            );
+        }
         context->stable_output_frames = 0;
         ScreamBarAsyncSRCClockControllerReset(context->clock_controller);
     }
@@ -1372,6 +1511,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
         return noErr;
     }
     const uint64_t callback_start_host_time = AudioGetCurrentHostTime();
+    ScreamBarRecordDiagnosticArrival(&context->output_diagnostics, callback_start_host_time, frame_count);
     ScreamBarRecordCallbackHostTime(
         timestamp,
         &context->last_output_callback_host_time,
@@ -1389,7 +1529,8 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
             frame_count,
             context->output_callback_deadline_host_ticks_per_frame,
             &context->maximum_output_callback_execution_host_time,
-            &context->output_callback_deadline_miss_count
+            &context->output_callback_deadline_miss_count,
+            &context->output_diagnostics
         );
         return noErr;
     }
@@ -1400,11 +1541,13 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
             frame_count,
             context->output_callback_deadline_host_ticks_per_frame,
             &context->maximum_output_callback_execution_host_time,
-            &context->output_callback_deadline_miss_count
+            &context->output_callback_deadline_miss_count,
+            &context->output_diagnostics
         );
         return noErr;
     }
     ScreamBarStoreMaximum(&context->maximum_output_callback_frames, frame_count);
+    ScreamBarApplyHardwareRecovery(context);
 
     uint32_t readable_frames = ScreamBarSPSCRingBufferReadableFrames(
         context->ring_buffer
@@ -1471,7 +1614,8 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
                 frame_count,
                 context->output_callback_deadline_host_ticks_per_frame,
                 &context->maximum_output_callback_execution_host_time,
-                &context->output_callback_deadline_miss_count
+                &context->output_callback_deadline_miss_count,
+                &context->output_diagnostics
             );
             return noErr;
         }
@@ -1479,6 +1623,7 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
     }
 
     if (context->low_latency
+        && !context->hardware_recovery_active
         && target_fill_frames < context->maximum_target_fill_frames) {
         const uint32_t nominal_source_frames = (uint32_t)ceil(
             frame_count * context->input_sample_rate
@@ -1545,7 +1690,8 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
             frame_count,
             context->output_callback_deadline_host_ticks_per_frame,
             &context->maximum_output_callback_execution_host_time,
-            &context->output_callback_deadline_miss_count
+            &context->output_callback_deadline_miss_count,
+            &context->output_diagnostics
         );
         return noErr;
     }
@@ -1603,7 +1749,8 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
             frame_count,
             context->output_callback_deadline_host_ticks_per_frame,
             &context->maximum_output_callback_execution_host_time,
-            &context->output_callback_deadline_miss_count
+            &context->output_callback_deadline_miss_count,
+            &context->output_diagnostics
         );
         return noErr;
     }
@@ -1625,12 +1772,15 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
             frame_count,
             context->output_callback_deadline_host_ticks_per_frame,
             &context->maximum_output_callback_execution_host_time,
-            &context->output_callback_deadline_miss_count
+            &context->output_callback_deadline_miss_count,
+            &context->output_diagnostics
         );
         return noErr;
     }
 
-    context->stable_output_frames += frame_count;
+    if (!context->hardware_recovery_active) {
+        context->stable_output_frames += frame_count;
+    }
     const uint64_t stable_frame_threshold = (uint64_t)(
         context->output_sample_rate
             * SCREAM_BAR_STABLE_SECONDS_BEFORE_TARGET_REDUCTION
@@ -1657,7 +1807,8 @@ OSStatus ScreamBarAsyncSRCOutputCallback(
         frame_count,
         context->output_callback_deadline_host_ticks_per_frame,
         &context->maximum_output_callback_execution_host_time,
-        &context->output_callback_deadline_miss_count
+        &context->output_callback_deadline_miss_count,
+        &context->output_diagnostics
     );
     return noErr;
 }

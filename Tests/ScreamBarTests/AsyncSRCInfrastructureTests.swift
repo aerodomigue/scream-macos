@@ -844,8 +844,7 @@ final class AsyncSRCInfrastructureTests: XCTestCase {
         XCTAssertTrue(
             LegacyCoreAudioBackend.requiresBufferEscalation(
                 metrics: metrics,
-                callbackExceededConfiguredQuantum: false,
-                missedCallbackDeadline: false
+                callbackExceededConfiguredQuantum: false
             )
         )
     }
@@ -1018,15 +1017,13 @@ final class AsyncSRCInfrastructureTests: XCTestCase {
         XCTAssertFalse(
             LegacyCoreAudioBackend.requiresBufferEscalation(
                 metrics: startupMetrics,
-                callbackExceededConfiguredQuantum: false,
-                missedCallbackDeadline: false
+                callbackExceededConfiguredQuantum: false
             )
         )
         XCTAssertTrue(
             LegacyCoreAudioBackend.bufferEscalationReasons(
                 metrics: startupMetrics,
-                callbackExceededConfiguredQuantum: false,
-                missedCallbackDeadline: false
+                callbackExceededConfiguredQuantum: false
             ).isEmpty
         )
 
@@ -1035,15 +1032,13 @@ final class AsyncSRCInfrastructureTests: XCTestCase {
         XCTAssertTrue(
             LegacyCoreAudioBackend.requiresBufferEscalation(
                 metrics: runtimeResynchronizationMetrics,
-                callbackExceededConfiguredQuantum: false,
-                missedCallbackDeadline: false
+                callbackExceededConfiguredQuantum: false
             )
         )
         XCTAssertEqual(
             LegacyCoreAudioBackend.bufferEscalationReasons(
                 metrics: runtimeResynchronizationMetrics,
-                callbackExceededConfiguredQuantum: false,
-                missedCallbackDeadline: false
+                callbackExceededConfiguredQuantum: false
             ),
             ["FIFO resynchronizations: 1"]
         )
@@ -1054,8 +1049,7 @@ final class AsyncSRCInfrastructureTests: XCTestCase {
         XCTAssertTrue(
             LegacyCoreAudioBackend.requiresBufferEscalation(
                 metrics: overflowMetrics,
-                callbackExceededConfiguredQuantum: false,
-                missedCallbackDeadline: false
+                callbackExceededConfiguredQuantum: false
             )
         )
     }
@@ -1086,14 +1080,13 @@ final class AsyncSRCInfrastructureTests: XCTestCase {
             ),
             [
                 "FIFO underruns at latency ceiling: 1",
-                "callback execution exceeded its real-time deadline",
             ]
         )
         XCTAssertEqual(
             AsyncSRCStabilityCounters(metrics: newMetrics)
                 .subtracting(checkpoint)
                 .totalIncidentCount,
-            2
+            1
         )
     }
 

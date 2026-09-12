@@ -49,6 +49,7 @@ final class DirectAudioRoutingService: ObservableObject {
     private let hardwareInterruptionRecoverySleep: (UInt64) async throws -> Void
     private let monotonicTimeProvider: () -> TimeInterval
     private weak var logStore: RollingLogStore?
+    private let diagnosticFile: RoutingDiagnosticFile?
     private var configuration = DirectRoutingConfiguration()
     private var activeRoute: PreparedAudioRoute?
     private var workerTask: Task<Void, Never>?
@@ -64,6 +65,7 @@ final class DirectAudioRoutingService: ObservableObject {
 
     init(
         logStore: RollingLogStore,
+        diagnosticFile: RoutingDiagnosticFile? = nil,
         deviceService: CoreAudioDeviceService? = nil,
         permissionService: (any AudioInputPermissionServicing)? = nil,
         hardwareInterruptionRecoverySleep: @escaping (UInt64) async throws -> Void = {
@@ -74,6 +76,8 @@ final class DirectAudioRoutingService: ObservableObject {
         }
     ) {
         self.logStore = logStore
+        self.diagnosticFile = diagnosticFile
+        diagnosticFile?.append("Session started; macOS \(ProcessInfo.processInfo.operatingSystemVersionString); app \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"); pid \(ProcessInfo.processInfo.processIdentifier). Interval telemetry is approximate; elapsed callback execution includes OS preemption. Known hardware events do not prove responsibility for an audio loss.")
         self.deviceService = deviceService ?? CoreAudioDeviceService(logStore: logStore)
         self.permissionService = permissionService ?? AudioInputPermissionService()
         self.hardwareInterruptionRecoverySleep =
@@ -209,6 +213,8 @@ final class DirectAudioRoutingService: ObservableObject {
         }
         failures.append(contentsOf: deviceService.shutdown())
         state = failures.isEmpty ? .stopped : .failed(.cleanupFailed(failures))
+        diagnosticFile?.append("Session shutdown; cleanup failures: \(failures.count)")
+        await diagnosticFile?.flush()
         return failures
     }
 
@@ -397,55 +403,51 @@ final class DirectAudioRoutingService: ObservableObject {
                       self.desiredRunning,
                       self.activeRoute?.sessionID == preparedRoute.sessionID,
                       let latency = self.deviceService.routeLatency(
-                          sessionID: preparedRoute.sessionID
+                          sessionID: preparedRoute.sessionID,
+                          ignoringHardwareInterruption:
+                            self.recoveringRouteSessionID == preparedRoute.sessionID
                       ) else {
                     return
                 }
 
-                let escalationEvaluation: AutomaticBufferEscalationEvaluation
-                if self.recoveringRouteSessionID == preparedRoute.sessionID {
-                    escalationEvaluation = AutomaticBufferEscalationEvaluation(
-                        shouldEscalate: false,
-                        newlyObservedLowLevelIncidentCount: 0,
-                        recentEpisodeCount: 0,
-                        didStartEpisode: false,
-                        didEndEpisode: false,
-                        isPersistentEpisode: false
+                let sensitivity = self.configuration.bufferSize == .automatic
+                    ? self.configuration.automaticSensitivity
+                    : .strict
+                let escalationEvaluation = self.automaticBufferEscalationGate
+                    .evaluate(
+                        sensitivity: sensitivity,
+                        routeRequiresEscalation:
+                            latency.requiresBufferEscalation,
+                        cumulativeIncidentCount:
+                            latency.bufferEscalationIncidentCount,
+                        monotonicTime: self.monotonicTimeProvider()
                     )
-                } else {
-                    let sensitivity = self.configuration.bufferSize == .automatic
-                        ? self.configuration.automaticSensitivity
-                        : .strict
-                    escalationEvaluation = self.automaticBufferEscalationGate
-                        .evaluate(
-                            sensitivity: sensitivity,
-                            routeRequiresEscalation:
-                                latency.requiresBufferEscalation,
-                            cumulativeIncidentCount:
-                                latency.bufferEscalationIncidentCount,
-                            monotonicTime: self.monotonicTimeProvider()
-                        )
-                    if sensitivity == .relaxed,
-                       escalationEvaluation.didEndEpisode {
-                        self.deviceService.checkpointRouteStability(
-                            sessionID: preparedRoute.sessionID
-                        )
-                        self.report(
-                            "Relaxed automatic buffer episode recovered"
-                        )
-                    }
-                    if sensitivity == .relaxed,
-                       escalationEvaluation.didStartEpisode,
-                       !escalationEvaluation.shouldEscalate {
-                        let lowLevelIncidentDescription =
-                            escalationEvaluation
-                                .newlyObservedLowLevelIncidentCount == 1
-                            ? "1 low-level event"
-                            : "\(escalationEvaluation.newlyObservedLowLevelIncidentCount) low-level events"
-                        self.report(
-                            "Relaxed automatic buffer sensitivity recorded episode \(escalationEvaluation.recentEpisodeCount) of 3 in 10 seconds (\(lowLevelIncidentDescription))"
-                        )
-                    }
+                let reasonSuffix = latency.bufferEscalationReason.map {
+                    " (\($0))"
+                } ?? ""
+                if let diagnosticDescription = latency.intervalDiagnosticDescription {
+                    self.report(diagnosticDescription)
+                }
+                if sensitivity == .relaxed,
+                   escalationEvaluation.didEndEpisode {
+                    self.deviceService.checkpointRouteStability(
+                        sessionID: preparedRoute.sessionID
+                    )
+                    self.report(
+                        "Relaxed automatic buffer episode recovered"
+                    )
+                }
+                if sensitivity == .relaxed,
+                   escalationEvaluation.didStartEpisode,
+                   !escalationEvaluation.shouldEscalate {
+                    let lowLevelIncidentDescription =
+                        escalationEvaluation
+                            .newlyObservedLowLevelIncidentCount == 1
+                        ? "1 low-level event"
+                        : "\(escalationEvaluation.newlyObservedLowLevelIncidentCount) low-level events"
+                    self.report(
+                        "Relaxed automatic buffer sensitivity recorded episode \(escalationEvaluation.recentEpisodeCount) of 3 in 10 seconds (\(lowLevelIncidentDescription))\(reasonSuffix)"
+                    )
                 }
 
                 if escalationEvaluation.shouldEscalate {
@@ -456,9 +458,6 @@ final class DirectAudioRoutingService: ObservableObject {
                         self.automaticBufferOverride = nextFrameCount
                         self.automaticBufferRouteIdentity =
                             AutomaticBufferRouteIdentity(route: preparedRoute.route)
-                        let reasonSuffix = latency.bufferEscalationReason.map {
-                            " (\($0))"
-                        } ?? ""
                         let disruptionDescription =
                             escalationEvaluation.isPersistentEpisode
                             ? "a persistent runtime disruption"
@@ -595,10 +594,19 @@ final class DirectAudioRoutingService: ObservableObject {
 
     private func beginHardwareInterruptionRecovery() {
         guard let sessionID = activeRoute?.sessionID else { return }
+        if recoveringRouteSessionID != sessionID {
+            report("CoreAudio hardware change observed; transport incident filtering active during recovery")
+            if let target = deviceService.setRouteHardwareRecovery(sessionID: sessionID, active: true) {
+                report("CoreAudio recovery holding the pre-interruption FIFO target at \(target) frames")
+            }
+        }
         hardwareInterruptionRecoveryTask?.cancel()
         automaticBufferEscalationGate.reset()
         recoveringRouteSessionID = sessionID
-        deviceService.checkpointRouteStability(sessionID: sessionID)
+        deviceService.checkpointRouteStability(
+            sessionID: sessionID,
+            scope: .hardwareInterruption
+        )
         hardwareInterruptionRecoveryTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -613,16 +621,22 @@ final class DirectAudioRoutingService: ObservableObject {
                 )
                 self.recoveringRouteSessionID = nil
                 self.hardwareInterruptionRecoveryTask = nil
+                self.deviceService.setRouteHardwareRecovery(sessionID: sessionID, active: false)
                 return
             }
             guard self.desiredRunning,
                   self.activeRoute?.sessionID == sessionID else {
                 return
             }
-            self.deviceService.checkpointRouteStability(sessionID: sessionID)
+            self.deviceService.checkpointRouteStability(
+                sessionID: sessionID,
+                scope: .hardwareInterruption
+            )
+            self.deviceService.setRouteHardwareRecovery(sessionID: sessionID, active: false)
             self.automaticBufferEscalationGate.reset()
             self.recoveringRouteSessionID = nil
             self.hardwareInterruptionRecoveryTask = nil
+            self.report("CoreAudio hardware recovery window ended; transport incident monitoring resumed")
             directRoutingLogger.debug(
                 "Direct Routing resumed stability monitoring after an unrelated CoreAudio hardware interruption"
             )
@@ -630,6 +644,9 @@ final class DirectAudioRoutingService: ObservableObject {
     }
 
     private func cancelHardwareInterruptionRecovery() {
+        if let sessionID = recoveringRouteSessionID {
+            deviceService.setRouteHardwareRecovery(sessionID: sessionID, active: false)
+        }
         hardwareInterruptionRecoveryTask?.cancel()
         hardwareInterruptionRecoveryTask = nil
         recoveringRouteSessionID = nil
@@ -885,5 +902,6 @@ final class DirectAudioRoutingService: ObservableObject {
     private func report(_ message: String) {
         directRoutingLogger.info("\(message, privacy: .public)")
         logStore?.append(source: .routing, message: message)
+        diagnosticFile?.append(message)
     }
 }
