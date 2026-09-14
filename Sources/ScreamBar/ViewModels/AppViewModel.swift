@@ -203,6 +203,11 @@ final class AppViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        wakeOnLANService.$lastSentAt
+            .compactMap { $0 }
+            .sink { [weak self] _ in self?.daemonShutdownService.wakePacketDidSend() }
+            .store(in: &cancellables)
+
         daemonShutdownService.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }

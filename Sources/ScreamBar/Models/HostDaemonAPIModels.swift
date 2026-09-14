@@ -142,6 +142,8 @@ enum HostDaemonClientError: LocalizedError, Sendable {
         case .identityMismatch: return "The agent identity differs from the imported trust bundle."
         case .invalidRequest: return "The agent request parameters are invalid."
         case .keychainFailure(let status): return "The agent credential could not be accessed in Keychain (\(status))."
+        case .network(let code) where code == URLError.timedOut.rawValue:
+            return "The agent did not respond in time (network error \(code))."
         case .network(let code): return "The agent request could not be completed (network error \(code))."
         case .api(let problem): return "Agent: \(problem.detail) (\(problem.code))"
         }

@@ -80,6 +80,11 @@ keyboard shortcuts continue to perform WOL/audio actions; they do not initiate
 shutdown. Accepted/pending shutdowns remain visible even if WOL is disabled in
 Settings. Trust/key replacement is blocked while an operation is pending.
 
+Sending WOL only wakes the machine; automatic agent checks read its status and
+module availability without requesting shutdown. A connectivity error clears when
+the agent responds again. Completed result messages clear on the next menu opening
+or WOL send; pending and accepted shutdown records are retained.
+
 ## Per-client keys and existing installations
 
 Pairing is required by the daemon's new-installation default. Existing explicit

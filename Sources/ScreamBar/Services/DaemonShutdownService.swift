@@ -18,7 +18,8 @@ final class DaemonShutdownService: ObservableObject {
     @Published private(set) var isReachable = false
     @Published private(set) var isBusy = false
     @Published private(set) var statusDescription: String?
-    @Published private(set) var lastError: String?
+    @Published private var actionError: String?
+    @Published private var monitoringError: String?
     @Published private var pendingAction: DaemonPendingAction?
     @Published private var currentOperation: HostDaemonOperation?
     @Published private var recoveryBlocked = false
@@ -53,7 +54,7 @@ final class DaemonShutdownService: ObservableObject {
         } catch {
             recoveryBlocked = true
             let message = "The saved shutdown result could not be restored. Its outcome is unknown. \(error.localizedDescription)"
-            lastError = message
+            actionError = message
             publishLog(message)
         }
         restartMonitoring()
@@ -61,6 +62,7 @@ final class DaemonShutdownService: ObservableObject {
 
     deinit { monitorTask?.cancel() }
 
+    var lastError: String? { actionError ?? monitoringError }
     var hasPendingAction: Bool { pendingAction != nil || recoveryBlocked }
     var isAwaitingHostRestart: Bool { pendingAction?.osShutdownAccepted == true }
     var isCheckingAgent: Bool { isConfigured && verifiedStatus == nil && lastError == nil }
@@ -94,7 +96,7 @@ final class DaemonShutdownService: ObservableObject {
         isReachable = false
         shutdownAvailable = false
         verifiedStatus = nil
-        if !hasPendingAction { statusDescription = nil; lastError = nil; actionResultIsDisplayed = false }
+        if !hasPendingAction { clearCompletedPresentation() }
         restartMonitoring()
     }
 
@@ -126,8 +128,28 @@ final class DaemonShutdownService: ObservableObject {
             isReachable = false
             shutdownAvailable = false
             verifiedStatus = nil
+        } else if !hasPendingAction && !isBusy {
+            clearCompletedPresentation()
         }
         restartMonitoring()
+    }
+
+    /// Starts a fresh availability check after WOL without changing any pending shutdown.
+    func wakePacketDidSend() {
+        guard !hasPendingAction, !isBusy else { return }
+        configurationRevision &+= 1
+        clearCompletedPresentation()
+        isReachable = false
+        shutdownAvailable = false
+        verifiedStatus = nil
+        restartMonitoring()
+    }
+
+    private func clearCompletedPresentation() {
+        statusDescription = nil
+        actionError = nil
+        monitoringError = nil
+        actionResultIsDisplayed = false
     }
 
     func refresh() async {
@@ -144,6 +166,7 @@ final class DaemonShutdownService: ObservableObject {
             try validate(status: status, endpoint: endpoint)
             let modules = try await api.modules(endpoint: endpoint)
             guard !isBusy, revision == configurationRevision, configuredEndpoint == endpoint else { return }
+            monitoringError = nil
             verifiedStatus = status
             isReachable = true
             let power = modules.first(where: { $0.supportsShutdown })
@@ -153,7 +176,7 @@ final class DaemonShutdownService: ObservableObject {
             shutdownAvailable = status.readiness != "stopping" && power != nil
                 && (status.principalID != "anonymous" || anonymousAllowed)
             if !hasPendingAction && !isBusy && !actionResultIsDisplayed {
-                lastError = nil
+                actionError = nil
                 statusDescription = shutdownAvailable ? "Agent ready" : "The agent shutdown module is unavailable."
             }
         } catch {
@@ -161,7 +184,14 @@ final class DaemonShutdownService: ObservableObject {
             isReachable = false
             shutdownAvailable = false
             verifiedStatus = nil
-            if !hasPendingAction && !isBusy { report(error.localizedDescription) }
+            if !hasPendingAction && !isBusy {
+                if !actionResultIsDisplayed { statusDescription = nil }
+                let message = "Could not check agent status. \(error.localizedDescription)"
+                if monitoringError != message {
+                    monitoringError = message
+                    publishLog(message)
+                }
+            }
         }
     }
 
@@ -170,7 +200,7 @@ final class DaemonShutdownService: ObservableObject {
         isBusy = true
         defer { isBusy = false; restartMonitoring() }
         actionResultIsDisplayed = false
-        lastError = nil
+        actionError = nil
         let action = DaemonPendingAction(endpoint: endpoint, requestID: UUID(),
                                          instanceID: status.instanceID, principalID: status.principalID)
         do {
@@ -203,7 +233,7 @@ final class DaemonShutdownService: ObservableObject {
         guard canCancel, let action = pendingAction, let operationID = action.operationID else { return }
         isBusy = true
         defer { isBusy = false; restartMonitoring() }
-        lastError = nil
+        actionError = nil
         do {
             let operation = try await api.cancel(endpoint: action.endpoint(), id: operationID,
                                                   instanceID: action.instanceID)
@@ -228,7 +258,7 @@ final class DaemonShutdownService: ObservableObject {
             recoveryBlocked = false
             statusDescription = "Unknown result cleared; this does not cancel shutdown."
             actionResultIsDisplayed = true
-            lastError = nil
+            actionError = nil
             restartMonitoring()
         } catch { report("Could not clear the saved shutdown result. \(error.localizedDescription)") }
     }
@@ -267,7 +297,7 @@ final class DaemonShutdownService: ObservableObject {
                 pendingAcceptanceNeedsPersistence = false
                 actionResultIsDisplayed = true
                 if action.osShutdownAccepted == true {
-                    lastError = nil
+                    actionError = nil
                     statusDescription = "Agent available again on \(action.host)."
                     publishLog("A new agent instance is available after the accepted shutdown on \(action.host).")
                 } else {
@@ -332,7 +362,7 @@ final class DaemonShutdownService: ObservableObject {
         pendingAcceptanceNeedsPersistence = acceptedAction.osShutdownAccepted == true
         try pendingStore.save(acceptedAction)
         pendingAcceptanceNeedsPersistence = false
-        lastError = nil
+        actionError = nil
         switch operation.state {
         case "scheduled":
             if let remaining = operation.remainingDelayMilliseconds {
@@ -434,8 +464,8 @@ final class DaemonShutdownService: ObservableObject {
     }
 
     private func report(_ message: String) {
-        guard lastError != message else { return }
-        lastError = message
+        guard actionError != message else { return }
+        actionError = message
         publishLog(message)
     }
 
