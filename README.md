@@ -57,6 +57,13 @@ My current setup uses:
 | Monitor input selection | DDC/CI switching between the desktop PC and the Mac |
 | Audio from both machines | SteelSeries Arctis Nova Pro Omni and its dual audio inputs |
 
+In my experience, the system has never been as stable as it is with the ADDER
+and direct HDMI-over-fiber connection. The Apollo/Sunshine freezes I encountered
+when VRAM filled up are gone, along with the performance overhead of capturing
+and encoding the video stream. I can also finally access the BIOS and other
+settings outside the operating system, without relying on a streaming service
+being available. These are the practical gains that made me stay with hardware.
+
 The HDMI cable carries the picture, and the USB hardware connects the peripherals.
 ScreamBar handles the audio passthrough when needed, headset controls, and PC power
 controls around that setup. The KVM and monitor switching are parts of my desk
