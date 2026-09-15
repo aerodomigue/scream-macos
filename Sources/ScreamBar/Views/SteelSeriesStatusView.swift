@@ -16,6 +16,7 @@ struct SteelSeriesStatusView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            SteelSeriesVolumeSection(service: service.volumeKeys)
             batteryRow("Headset battery", percentage: service.state.headsetBatteryText)
             batteryRow("Battery in base", percentage: service.state.baseBatteryText)
         }
@@ -24,10 +25,43 @@ struct SteelSeriesStatusView: View {
     }
 
     private func batteryRow(_ label: String, percentage: String) -> some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline) {
             Text(label)
             Spacer()
             Text(percentage).monospacedDigit()
+        }
+    }
+}
+
+private struct SteelSeriesVolumeSection: View {
+    @ObservedObject var service: SteelSeriesVolumeKeyService
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Volume")
+                Spacer()
+                Text(service.volumeText).monospacedDigit()
+            }
+            SteelSeriesVolumeKeysView(service: service)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SteelSeriesVolumeKeysView: View {
+    @ObservedObject var service: SteelSeriesVolumeKeyService
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(service.statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if service.needsPermission {
+                Button("Allow volume keys…") { service.requestPermission() }
+                    .controlSize(.small)
+            }
         }
     }
 }

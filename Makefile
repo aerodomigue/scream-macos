@@ -4,6 +4,8 @@ BUNDLE_ID := com.screambar.app
 BUILD_DIR := .build/release
 APP_BUNDLE := $(BUILD_DIR)/$(APP_NAME).app
 INSTALL_DIR := /Applications
+SIGNING_IDENTITY ?= ScreamBar Local Signing
+SIGNING_KEYCHAIN := $(abspath .screambar-signing.keychain-db)
 
 HOMEBREW_PREFIX := /opt/homebrew
 
@@ -14,7 +16,7 @@ LIBSAMPLERATE := $(HOMEBREW_PREFIX)/opt/libsamplerate/lib/libsamplerate.0.dylib
 
 DYLIBS := $(LIBJACK) $(LIBSOXR) $(LIBDB) $(LIBSAMPLERATE)
 
-.PHONY: help dev-run build clean install
+.PHONY: help dev-run setup-signing check-signing build clean install
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -23,7 +25,17 @@ help: ## Show this help
 dev-run: ## Run in development mode
 	swift run
 
-build: ## Build release .app bundle
+setup-signing: ## Create or reuse the isolated project signing identity
+	./scripts/setup-local-signing.sh
+
+check-signing:
+	@test "$(SIGNING_IDENTITY)" != "-" || { echo "Ad-hoc signing would invalidate permissions after updates." >&2; exit 1; }
+	@./scripts/setup-local-signing.sh --check
+	@security find-identity -p codesigning "$(SIGNING_KEYCHAIN)" | awk -v identity="$(SIGNING_IDENTITY)" \
+		'$$2 == identity || index($$0, "\"" identity "\"") { found = 1 } END { exit !found }' \
+		|| { echo 'Signing identity unavailable in the project keychain. Restore the project signing files.' >&2; exit 1; }
+
+build: check-signing ## Build release .app bundle with a persistent signing identity
 	swift build -c release
 
 	@# Create .app bundle structure
@@ -72,8 +84,8 @@ build: ## Build release .app bundle
 		$(APP_BUNDLE)/Contents/Frameworks/libsamplerate.0.dylib
 
 	@# Re-sign after install_name_tool modifications
-	codesign --force -s - $(APP_BUNDLE)/Contents/Resources/scream
-	codesign --force -s - $(APP_BUNDLE)/Contents/Frameworks/*.dylib
+	codesign --force --keychain "$(SIGNING_KEYCHAIN)" -s "$(SIGNING_IDENTITY)" $(APP_BUNDLE)/Contents/Resources/scream
+	codesign --force --keychain "$(SIGNING_KEYCHAIN)" -s "$(SIGNING_IDENTITY)" $(APP_BUNDLE)/Contents/Frameworks/*.dylib
 
 	@# Generate Info.plist
 	/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $(BUNDLE_ID)" $(APP_BUNDLE)/Contents/Info.plist
@@ -89,7 +101,8 @@ build: ## Build release .app bundle
 	/usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string ScreamBar uses your local network to wake computers and securely request shutdown from Host Daemon." $(APP_BUNDLE)/Contents/Info.plist
 
 	@# Sign the completed bundle so macOS can associate TCC permissions with the app
-	codesign --force --deep -s - $(APP_BUNDLE)
+	codesign --force --keychain "$(SIGNING_KEYCHAIN)" -s "$(SIGNING_IDENTITY)" $(APP_BUNDLE)
+	codesign --verify --deep --strict $(APP_BUNDLE)
 
 	@echo "Built $(APP_BUNDLE)"
 

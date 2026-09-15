@@ -76,7 +76,11 @@ struct MenuBarView: View {
         }
         .frame(width: 380, height: 420)
         .onAppear {
+            viewModel.setStatusTabSelected(selectedTab == .status)
             viewModel.setMenuVisible(true)
+        }
+        .onChange(of: selectedTab) { selected in
+            viewModel.setStatusTabSelected(selected == .status)
         }
         .onDisappear {
             viewModel.setMenuVisible(false)

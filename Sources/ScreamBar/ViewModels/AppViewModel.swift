@@ -37,6 +37,7 @@ final class AppViewModel: ObservableObject {
         didSet { updateHeadsetMonitoring() }
     }
     private var isMenuVisible = false
+    private var isStatusTabSelected = true
     private var jackRestartAttempts = 0
     private var pendingRestartTask: Task<Void, Never>?
     private var serviceStartupTask: Task<Void, Never>?
@@ -199,6 +200,12 @@ final class AppViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        directRoutingService.deviceService.$snapshot
+            .sink { [weak self] snapshot in
+                self?.steelSeriesService.volumeKeys.updateOutput(snapshot)
+            }
+            .store(in: &cancellables)
+
         wakeOnLANService.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -257,7 +264,19 @@ final class AppViewModel: ObservableObject {
 
     func setMenuVisible(_ isVisible: Bool) {
         isMenuVisible = isVisible
+        updateVolumeDisplayVisibility()
         updateHostMonitoring()
+    }
+
+    func setStatusTabSelected(_ selected: Bool) {
+        isStatusTabSelected = selected
+        updateVolumeDisplayVisibility()
+    }
+
+    private func updateVolumeDisplayVisibility() {
+        steelSeriesService.volumeKeys.setDisplayVisible(
+            .mainStatus, visible: isMenuVisible && isStatusTabSelected
+        )
     }
 
     private func updateHostMonitoring() {
@@ -672,6 +691,7 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.directRoutingService.revalidatePermissionIfRunning()
+                self.steelSeriesService.volumeKeys.revalidatePermission()
             }
         }
     }

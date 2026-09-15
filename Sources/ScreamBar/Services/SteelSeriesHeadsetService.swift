@@ -7,6 +7,7 @@ final class SteelSeriesHeadsetService: ObservableObject {
     private static let MINIMUM_LOG_INTERVAL: TimeInterval = 30
 
     @Published private(set) var state: SteelSeriesHeadsetState = .disabled
+    let volumeKeys: SteelSeriesVolumeKeyService
     private let transport: SteelSeriesStatusReading
     private weak var logStore: RollingLogStore?
     private let pollInterval: UInt64
@@ -21,7 +22,11 @@ final class SteelSeriesHeadsetService: ObservableObject {
         pollInterval: UInt64? = nil
     ) {
         self.logStore = logStore
-        self.transport = transport ?? SteelSeriesHIDTransport()
+        let defaultTransport = SteelSeriesHIDTransport()
+        self.transport = transport ?? defaultTransport
+        self.volumeKeys = SteelSeriesVolumeKeyService(
+            transport: (transport as? SteelSeriesVolumeAdjusting) ?? defaultTransport, logStore: logStore
+        )
         self.pollInterval = pollInterval ?? Self.POLL_INTERVAL_NANOSECONDS
     }
 
@@ -32,6 +37,7 @@ final class SteelSeriesHeadsetService: ObservableObject {
         revision &+= 1
         monitoringTask?.cancel()
         monitoringTask = nil
+        volumeKeys.update(enabled: enabled, connected: false)
         guard enabled else {
             state = .disabled
             return
@@ -59,6 +65,7 @@ final class SteelSeriesHeadsetService: ObservableObject {
 
     private func publish(_ snapshot: SteelSeriesHeadsetState) {
         if state != snapshot { state = snapshot }
+        volumeKeys.update(enabled: true, connected: snapshot.status?.connection == .connected)
         let description = snapshot.connectionDescription
         // Battery polls are silent; even a flapping USB link logs at most twice a minute.
         guard description != lastLoggedDescription,

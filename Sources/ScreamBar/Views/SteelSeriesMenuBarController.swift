@@ -7,6 +7,7 @@ final class SteelSeriesMenuBarController: NSObject, ObservableObject, NSPopoverD
     private static let AUTOSAVE_NAME = "SteelSeriesOmniBattery"
     private static let POPOVER_WIDTH: CGFloat = 310
     private let service: SteelSeriesHeadsetService
+    private let volumeHUD: SteelSeriesVolumeHUDController
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
     private let dismissalMonitor = PopoverDismissalMonitor()
@@ -14,6 +15,7 @@ final class SteelSeriesMenuBarController: NSObject, ObservableObject, NSPopoverD
 
     init(service: SteelSeriesHeadsetService) {
         self.service = service
+        self.volumeHUD = SteelSeriesVolumeHUDController(service: service.volumeKeys)
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -37,16 +39,15 @@ final class SteelSeriesMenuBarController: NSObject, ObservableObject, NSPopoverD
             item.autosaveName = Self.AUTOSAVE_NAME
             item.button?.target = self
             item.button?.action = #selector(togglePopover)
-            item.button?.imagePosition = .imageLeading
-            item.button?.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+            item.button?.imagePosition = .imageOnly
+            item.button?.title = ""
             statusItem = item
         }
         statusItem?.isVisible = true
         let description = "SteelSeries Omni: \(state.connectionDescription). Headset: \(state.headsetBatteryText). Battery in base: \(state.baseBatteryText)."
-        statusItem?.button?.image = MenuBarSymbol.image(
-            name: "headphones", color: .white, description: description
+        statusItem?.button?.image = SteelSeriesMenuBarImage.make(
+            batteryText: state.headsetBatteryText, description: description
         )
-        statusItem?.button?.title = " \(state.headsetBatteryText)"
         statusItem?.button?.toolTip = description
         statusItem?.button?.setAccessibilityLabel(description)
     }
@@ -57,6 +58,7 @@ final class SteelSeriesMenuBarController: NSObject, ObservableObject, NSPopoverD
             closePopover()
         } else {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            service.volumeKeys.setDisplayVisible(.headsetPopover, visible: popover.isShown)
             if popover.isShown, let contentWindow = popover.contentViewController?.view.window {
                 dismissalMonitor.start(contentWindow: contentWindow, anchorView: button) { [weak self] in
                     self?.closePopover()
@@ -66,11 +68,13 @@ final class SteelSeriesMenuBarController: NSObject, ObservableObject, NSPopoverD
     }
 
     private func closePopover() {
+        service.volumeKeys.setDisplayVisible(.headsetPopover, visible: false)
         dismissalMonitor.stop()
         popover.performClose(nil)
     }
 
     func popoverDidClose(_ notification: Notification) {
+        service.volumeKeys.setDisplayVisible(.headsetPopover, visible: false)
         dismissalMonitor.stop()
     }
 }
