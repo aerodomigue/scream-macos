@@ -26,10 +26,41 @@ headset controls within reach. The name comes from Scream, but the app has grown
 beyond receiving network audio.
 
 After more than five years using Moonlight and Parsec, I went back to a hardware
-setup: a fiber-optic HDMI connection for video and an audio passthrough path when
-needed. I prefer that arrangement for my everyday use instead of depending on a
-remote desktop or game-streaming session. The HDMI cable carries the picture;
-ScreamBar handles the audio and convenience controls around that setup.
+setup. A new **4K OLED 240 Hz HDR monitor** made the compromises harder to accept
+for my everyday use:
+
+- My RTX 3080 streaming setup topped out at about **178 fps in 4K**, below what I
+  wanted for the new display.
+- Latency and image quality remained a compromise in some games, even after
+  trying slower encoding settings to improve compression quality.
+- At 144 Hz and above, streaming did not feel as smooth to me as the native video
+  output, despite experimenting with frame pacing and VSync.
+- I frequently switch between Windows and Linux and need access to the BIOS.
+- I needed to connect USB devices at my desk to the other machine; my
+  Moonlight/Parsec setup did not provide the USB passthrough I needed.
+
+The 178 fps figure is my observed limit, not a universal RTX 3080 specification.
+[NVIDIA's hardware matrix](https://developer.nvidia.com/video-encode-decode-support-matrix)
+lists one NVENC engine for the RTX 3080 and two for the RTX 4080 (also the RTX 4070
+Ti). Using both engines for a single stream requires
+[split-frame encoding](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/nvenc-application-note/index.html#nvenc-performance),
+supported for HEVC and AV1 on those Ada GPUs; throughput still depends on the
+encoding configuration and software support.
+
+My current setup uses:
+
+| Role | Hardware or control |
+| --- | --- |
+| Video from the desktop PC | RUIPRO fiber-optic HDMI 2.1 cable |
+| USB connection to the desktop PC | ADDER C-USB LAN USB-over-IP extender |
+| Shared peripherals | KVM switch selecting the Mac or the ADDER connection |
+| Monitor input selection | DDC/CI switching between the desktop PC and the Mac |
+| Audio from both machines | SteelSeries Arctis Nova Pro Omni and its dual audio inputs |
+
+The HDMI cable carries the picture, and the USB hardware connects the peripherals.
+ScreamBar handles the audio passthrough when needed, headset controls, and PC power
+controls around that setup. The KVM and monitor switching are parts of my desk
+setup, not features implemented by ScreamBar.
 
 This is why audio routing, Wake-on-LAN, a shutdown agent, USB triggers, and support
 for one particular headset live in the same app. They solve related problems at
