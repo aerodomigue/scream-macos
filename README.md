@@ -5,8 +5,8 @@
 <h1 align="center">ScreamBar</h1>
 
 <p align="center">
-  <strong>Low-latency audio routing for the macOS menu bar.</strong><br>
-  Receive Scream network audio, route CoreAudio devices directly, monitor your SteelSeries headset batteries, and wake or shut down a remote machine from one compact application.
+  <strong>My menu bar toolbox for using a Mac alongside another machine.</strong><br>
+  Audio routing, headset controls, battery monitoring, and PC power controls, collected in one personal macOS application.
 </p>
 
 <p align="center">
@@ -17,12 +17,33 @@
   <img src="docs/screenshot/global%20capture.png" width="474" alt="ScreamBar running Direct Routing and Wake-on-LAN from the macOS menu bar">
 </p>
 
+## Why this project exists
+
+ScreamBar is my personal, slightly eclectic toolbox for making my Mac and another
+machine easy to use together. Its features follow the needs of my own setup:
+audio passthrough, shared peripherals, waking the PC, shutting it down, and keeping
+headset controls within reach. The name comes from Scream, but the app has grown
+beyond receiving network audio.
+
+After more than five years using Moonlight and Parsec, I went back to a hardware
+setup: a fiber-optic HDMI connection for video and an audio passthrough path when
+needed. I prefer that arrangement for my everyday use instead of depending on a
+remote desktop or game-streaming session. The HDMI cable carries the picture;
+ScreamBar handles the audio and convenience controls around that setup.
+
+This is why audio routing, Wake-on-LAN, a shutdown agent, USB triggers, and support
+for one particular headset live in the same app. They solve related problems at
+my desk, rather than following a plan for a general-purpose remote-access product.
+Scream remains available when network audio is useful.
+
+## Application modes
+
 ScreamBar provides four application modes:
 
 - **OFF** stops software audio routing while keeping PC monitoring, Wake-on-LAN, and paired shutdown control available.
 - **Scream** receives audio sent over the network by a [Scream](https://github.com/duncanthrax/scream) sender and plays it through JACK.
 - **Direct Routing** sends one CoreAudio input device directly to one CoreAudio output device without JACK or network capture.
-- **SteelSeries Omni** monitors an Arctis Nova Pro Omni base over USB, showing headset connection and both batteries. The base handles audio; ScreamBar does not route audio in this mode.
+- **SteelSeries Omni** monitors an Arctis Nova Pro Omni base over USB, showing headset connection, volume, and both batteries, with keyboard volume and mute controls. The base handles audio; ScreamBar does not route audio in this mode.
 
 Wake-on-LAN and the paired **Host Daemon** shutdown agent are available independently of the selected mode. See [agent setup and pairing](docs/host-daemon.md).
 
@@ -125,6 +146,18 @@ Shutdown uses a 3-second countdown and offers cancellation before native dispatc
 See [Host Daemon setup, pairing and shutdown behavior](docs/host-daemon.md). The target network and machine firmware/operating system must support Wake-on-LAN; some routers block directed broadcasts.
 
 ### SteelSeries Omni
+
+This mode exists because the **SteelSeries Arctis Nova Pro Omni is my headset**.
+Its base handles the audio, so it makes sense to stop ScreamBar's software routing
+while keeping the Mac's PC monitoring and power controls available.
+
+The remaining job is day-to-day control: seeing whether the headset is connected,
+checking its battery and the spare battery charging in the base, and changing the
+base's volume from the keyboard. In my USB setup, the standard macOS volume control
+does not provide that hardware-volume control. ScreamBar reads and writes it over
+the base's USB HID interface, without SteelSeries GG. The dedicated mode keeps
+these headset-specific controls together and only intercepts volume/mute keys when
+Omni mode is active, the headset is connected, and Omni is the Mac's default output.
 
 Select **SteelSeries Omni** and connect the Mac to **USB1** on the **SteelSeries Arctis Nova Pro Omni** base. Status shows:
 
