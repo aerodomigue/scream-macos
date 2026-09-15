@@ -102,6 +102,19 @@ The enrollment secret and client key are not written to app preferences or recov
 records. Importing again creates a new daemon client and replaces the local key;
 the previous daemon client is not automatically revoked.
 
+The first credential lookup is shared across all API requests and cached in memory
+for the app session. Status polling does not reopen the Keychain prompt. Missing
+credentials and denied/cancelled access are cached too; **Check** explicitly retries
+a failed lookup. A successful pairing replaces the cached token, and **Forget**
+clears it. No token is logged or copied to preferences.
+
+With the local self-signed certificate, the login Keychain can authorize a specific
+build's code hash (`cdhash`), so **Always Allow** may need to be granted again after
+a rebuild even though the signing certificate is unchanged. The session cache
+prevents repeated prompts within that run; it does not alter Keychain access rules.
+Apple-issued development/Developer ID signatures use a team-based partition instead
+([Apple Security implementation](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/clientid.cpp#L254-L273)).
+
 A revoked/invalid supplied key is rejected; the client does not silently retry as
 anonymous. **Forget** removes the current connection's locally stored key and public
 trust. `hostctl clients revoke <client-id>` revokes a specific client on the PC.
@@ -122,4 +135,4 @@ recovery and unknown outcomes. Existing WOL and settings migration tests are run
 
 No real Windows/Linux shutdown was sent during client validation. The app's WOL
 settings currently select IPv4 targets; the native HTTPS layer also supports IPv6.
-The bundle is built with the repository's existing ad-hoc signing process.
+The bundle uses the persistent local signing identity described in the README.

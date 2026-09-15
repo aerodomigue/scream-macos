@@ -7,7 +7,7 @@ struct HostDaemonAPIClient: HostDaemonAPI {
     private static let MAX_SHUTDOWN_DELAY_SECONDS = 300
     private static let MILLISECONDS_PER_SECOND = 1_000
     private static let OPERATION_STATES: Set<String> = ["scheduled", "running", "succeeded", "cancelled", "failed", "outcome_unknown"]
-    private let credentials = HostDaemonCredentialStore()
+    private let credentials = HostDaemonCredentialStore.shared
 
     func status(endpoint: HostDaemonEndpoint) async throws -> HostDaemonStatus {
         let status: HostDaemonStatus = try await request(endpoint, path: "/api/v1/status", expectedStatus: 200)
@@ -73,7 +73,7 @@ struct HostDaemonAPIClient: HostDaemonAPI {
         guard pairing.tokenType == "Bearer", HostDaemonCredentialStore.isValidToken(pairing.accessToken) else {
             throw HostDaemonClientError.invalidResponse
         }
-        try credentials.save(pairing.accessToken, for: endpoint)
+        try await credentials.save(pairing.accessToken, for: endpoint)
         return pairing
     }
 
@@ -112,9 +112,10 @@ struct HostDaemonAPIClient: HostDaemonAPI {
         request.setValue("application/json, application/problem+json", forHTTPHeaderField: "Accept")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        if useClientToken, let token = try credentials.token(for: endpoint) {
+        if useClientToken, let token = try await credentials.token(for: endpoint) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        try Task.checkCancellation()
         let transport = HostDaemonTrustTransport(endpoint: endpoint)
         let response = try await transport.perform(request)
         let decoder = JSONDecoder()

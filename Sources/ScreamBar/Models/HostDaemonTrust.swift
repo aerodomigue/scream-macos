@@ -64,6 +64,9 @@ struct HostDaemonEndpoint: Equatable, Sendable {
     let host: String
     let trust: HostDaemonTrust
     var port: Int { trust.port }
+    var credentialAccount: String {
+        "\(trust.daemonID.uuidString.lowercased())|\(host)|\(port)|\(trust.spkiSHA256)"
+    }
 
     init(host: String, trust: HostDaemonTrust) throws {
         var normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

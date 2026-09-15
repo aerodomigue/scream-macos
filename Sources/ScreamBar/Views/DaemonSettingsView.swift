@@ -29,10 +29,15 @@ struct DaemonSettingsView: View {
                 .disabled(host == nil || service.hasPendingAction || service.isBusy)
                 if trust != nil {
                     Button("Check") {
-                        Task { await service.refresh() }
+                        Task {
+                            if let host, let trust, let endpoint = try? HostDaemonEndpoint(host: host, trust: trust) {
+                                await HostDaemonCredentialStore.shared.allowRetry(for: endpoint)
+                            }
+                            await service.refresh()
+                        }
                     }
                     .disabled(service.isBusy || service.hasPendingAction)
-                    Button("Forget") { forgetIdentity() }
+                    Button("Forget") { Task { await forgetIdentity() } }
                         .disabled(service.hasPendingAction || service.isBusy)
                 }
             }
@@ -53,11 +58,12 @@ struct DaemonSettingsView: View {
         }
     }
 
-    private func forgetIdentity() {
-        guard !service.hasPendingAction, !service.isBusy else { return }
+    private func forgetIdentity() async {
+        guard service.beginConfigurationChange() else { return }
+        defer { service.endConfigurationChange() }
         do {
             if let host, let trust {
-                try HostDaemonCredentialStore().remove(for: HostDaemonEndpoint(host: host, trust: trust))
+                try await HostDaemonCredentialStore.shared.remove(for: HostDaemonEndpoint(host: host, trust: trust))
             }
             trust = nil
             settingsError = nil
