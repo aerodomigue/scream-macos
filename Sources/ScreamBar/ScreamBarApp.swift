@@ -13,12 +13,17 @@ struct ScreamBarApp: App {
                 .environmentObject(daemonImportWindowController)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: viewModel.menuBarIcon)
+                if let icon = viewModel.menuBarIndicator.image {
+                    Image(nsImage: icon)
+                        .renderingMode(.original)
+                        .accessibilityLabel(viewModel.menuBarIndicator.description)
+                }
                 if let statusText = viewModel.menuBarStatusText {
                     Text(statusText)
                         .monospacedDigit()
                 }
             }
+            .help(viewModel.menuBarIndicator.description)
         }
         .menuBarExtraStyle(.window)
     }

@@ -25,6 +25,8 @@ struct PersistedAudioRuntimeState: Codable, Equatable, Sendable {
 
     mutating func setMode(_ mode: ApplicationMode, shouldRun: Bool) {
         switch mode {
+        case .off, .steelSeriesOmni:
+            break
         case .scream:
             setScreamRuntime(
                 jackShouldRun: shouldRun,
@@ -41,6 +43,8 @@ struct PersistedAudioRuntimeState: Codable, Equatable, Sendable {
     ) -> Self {
         guard legacyAutoStart else { return Self() }
         switch selectedMode {
+        case .off, .steelSeriesOmni:
+            return Self()
         case .scream:
             return Self(jackShouldRun: true, screamShouldRun: true)
         case .directRouting:

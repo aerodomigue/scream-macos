@@ -23,18 +23,29 @@ struct SettingsView: View {
                         Text(mode.label).tag(mode)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .labelsHidden()
             }
 
             if applicationMode == .scream {
                 screamSettings
-            } else {
+            } else if applicationMode == .directRouting {
                 DirectRoutingSettingsView(
                     configuration: $directRoutingConfiguration,
                     deviceService: directRoutingService.deviceService,
                     routingService: directRoutingService
                 )
+            } else if applicationMode == .steelSeriesOmni {
+                Section {
+                    Text("Audio is handled by the SteelSeries base. Connect this Mac to USB1 to display the headset and base batteries.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Section {
+                    Text("Audio routing is off. Select Scream or Direct Routing to enable it.")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             commonSettings
@@ -257,6 +268,11 @@ struct SettingsView: View {
     }
 
     private var shortcutDescription: String {
+        if !applicationMode.routesAudio {
+            return hotkeyService.layout == .combined
+                ? "Sends Wake on LAN when enabled. Audio routing stays off."
+                : "The Audio shortcut is inactive while routing is off. The Wake on LAN shortcut remains available."
+        }
         switch hotkeyService.layout {
         case .combined:
             return "Starts audio and sends Wake on LAN when it is enabled. Press again to stop audio without sending another packet."

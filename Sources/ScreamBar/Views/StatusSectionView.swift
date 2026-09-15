@@ -6,10 +6,20 @@ struct StatusSectionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if viewModel.applicationMode == .scream {
+            switch viewModel.applicationMode {
+            case .off:
+                Label(
+                    offStatusDescription,
+                    systemImage: "speaker.slash.fill"
+                )
+                .foregroundStyle(.secondary)
+                .padding(16)
+            case .scream:
                 screamStatus
-            } else {
+            case .directRouting:
                 directRoutingStatus
+            case .steelSeriesOmni:
+                SteelSeriesStatusView(service: viewModel.steelSeriesService)
             }
             if viewModel.wakeOnLANConfiguration.isEnabled || viewModel.daemonShutdownService.hasPendingAction {
                 Divider()
@@ -118,6 +128,16 @@ struct StatusSectionView: View {
             .padding(.horizontal, 4)
         }
         .padding(16)
+    }
+
+    private var offStatusDescription: String {
+        if viewModel.audioModeCoordinator.isTransitioning {
+            return "Stopping audio…"
+        }
+        if viewModel.audioModeCoordinator.transitionError != nil {
+            return "Audio shutdown failed"
+        }
+        return "Audio routing is off"
     }
 
     private var directRoutingDescription: String {

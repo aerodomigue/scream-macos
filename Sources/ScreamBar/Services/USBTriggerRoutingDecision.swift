@@ -1,6 +1,7 @@
 import Foundation
 
 enum USBTriggerRuntimeAction: Equatable {
+    case none
     case screamOnly
     case screamAndJack
     case directRouting
@@ -26,6 +27,8 @@ enum USBTriggerRoutingDecision {
         screamToggleScope: ToggleScope
     ) -> USBTriggerRuntimeAction {
         switch mode {
+        case .off, .steelSeriesOmni:
+            return .none
         case .directRouting:
             return .directRouting
         case .scream:

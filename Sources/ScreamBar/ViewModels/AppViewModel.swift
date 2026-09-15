@@ -20,6 +20,8 @@ final class AppViewModel: ObservableObject {
     let jackService: JackService
     let screamService: ScreamService
     let directRoutingService: DirectAudioRoutingService
+    let steelSeriesService: SteelSeriesHeadsetService
+    private let steelSeriesMenuBarController: SteelSeriesMenuBarController
     let wakeOnLANService: WakeOnLANService
     let daemonShutdownService: DaemonShutdownService
     let audioModeCoordinator = AudioModeCoordinator()
@@ -31,7 +33,10 @@ final class AppViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var jackShouldBeRunning = false
     private var crashRecoveryGaveUp = false
-    private var isSleeping = false
+    private var isSleeping = false {
+        didSet { updateHeadsetMonitoring() }
+    }
+    private var isMenuVisible = false
     private var jackRestartAttempts = 0
     private var pendingRestartTask: Task<Void, Never>?
     private var serviceStartupTask: Task<Void, Never>?
@@ -57,6 +62,8 @@ final class AppViewModel: ObservableObject {
         didSet {
             saveConfiguration()
             switchApplicationMode(from: oldValue)
+            updateHostMonitoring()
+            updateHeadsetMonitoring()
         }
     }
 
@@ -97,43 +104,30 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var usbStartCommandError: String?
     @Published private(set) var isUSBStartCommandRunning = false
 
-    var menuBarIcon: String {
-        if applicationMode == .directRouting {
-            switch directRoutingService.state {
-            case .running:
-                return "speaker.wave.2.fill"
-            case .starting, .reconfiguring, .stopping:
-                return "speaker.wave.1.fill"
-            case .failed:
-                return "speaker.slash.fill"
-            case .stopped, .waitingForInput, .waitingForOutput:
-                return "speaker.fill"
-            }
+    var menuBarIndicator: MenuBarIndicator {
+        if !applicationMode.routesAudio {
+            let hostIsOnline = wakeOnLANService.reachability == .online
+                || daemonShutdownService.isReachable
+            let hasAgentError = (hostIsOnline || daemonShutdownService.hasPendingAction)
+                && daemonShutdownService.lastError != nil
+            return .host(
+                isEnabled: wakeOnLANConfiguration.isEnabled,
+                reachability: wakeOnLANService.reachability,
+                agentIsReachable: daemonShutdownService.isReachable,
+                hasError: wakeOnLANService.lastError != nil
+                    || wakeOnLANService.configurationErrorDescription != nil
+                    || hasAgentError
+                    || audioModeCoordinator.transitionError != nil
+            )
         }
-
-        let jackActive = jackService.status == .running
-        let screamActive = screamService.status == .running
-
-        if jackActive && screamActive {
-            return "speaker.wave.2.fill"
-        } else if jackActive || screamActive {
-            return "speaker.wave.1.fill"
-        }
-
-        let hasError: Bool
-        if case .error = jackService.status {
-            hasError = true
-        } else if case .error = screamService.status {
-            hasError = true
-        } else {
-            hasError = false
-        }
-
-        if hasError {
-            return "speaker.slash.fill"
-        }
-
-        return "speaker.fill"
+        return .audio(
+            mode: applicationMode,
+            routingState: directRoutingService.state,
+            jackStatus: jackService.status,
+            screamStatus: screamService.status,
+            isTransitioning: audioModeCoordinator.isTransitioning,
+            hasTransitionError: audioModeCoordinator.transitionError != nil
+        )
     }
 
     var menuBarStatusText: String? {
@@ -162,6 +156,8 @@ final class AppViewModel: ObservableObject {
         self.directRoutingService = DirectAudioRoutingService(
             logStore: store, diagnosticFile: RoutingDiagnosticFile()
         )
+        self.steelSeriesService = SteelSeriesHeadsetService(logStore: store)
+        self.steelSeriesMenuBarController = SteelSeriesMenuBarController(service: steelSeriesService)
         self.wakeOnLANService = WakeOnLANService(logStore: store)
         self.daemonShutdownService = DaemonShutdownService(logStore: store)
 
@@ -194,6 +190,11 @@ final class AppViewModel: ObservableObject {
             .store(in: &cancellables)
 
         directRoutingService.deviceService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        steelSeriesService.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
@@ -248,8 +249,23 @@ final class AppViewModel: ObservableObject {
         ApplicationTerminationController.shared.viewModel = self
         wakeOnLANService.configurationDidChange(wakeOnLANConfiguration)
         updateDaemonConnection()
+        updateHostMonitoring()
+        updateHeadsetMonitoring()
 
         restorePersistedAudioRuntimeState()
+    }
+
+    func setMenuVisible(_ isVisible: Bool) {
+        isMenuVisible = isVisible
+        updateHostMonitoring()
+    }
+
+    private func updateHostMonitoring() {
+        let needsMonitoring = MenuBarIndicator.needsHostMonitoring(
+            mode: applicationMode, isMenuVisible: isMenuVisible
+        )
+        wakeOnLANService.setInterfaceVisible(needsMonitoring)
+        daemonShutdownService.setInterfaceVisible(needsMonitoring)
     }
 
     func startActiveMode() {
@@ -262,6 +278,8 @@ final class AppViewModel: ObservableObject {
 
     private func startActiveModeUnchecked() {
         switch applicationMode {
+        case .off, .steelSeriesOmni:
+            return
         case .scream:
             startAllUnchecked()
         case .directRouting:
@@ -272,6 +290,8 @@ final class AppViewModel: ObservableObject {
     func stopActiveMode(force: Bool = false) {
         updateRuntimeIntent(for: applicationMode, shouldRun: false)
         switch applicationMode {
+        case .off, .steelSeriesOmni:
+            return
         case .scream:
             stopAll(force: force)
         case .directRouting:
@@ -333,6 +353,8 @@ final class AppViewModel: ObservableObject {
             mode: applicationMode,
             screamToggleScope: configuration.toggleScope
         ) {
+        case .none:
+            return
         case .screamOnly:
             startScream()
         case .screamAndJack:
@@ -380,6 +402,8 @@ final class AppViewModel: ObservableObject {
             mode: applicationMode,
             screamToggleScope: configuration.toggleScope
         ) {
+        case .none:
+            return
         case .screamOnly:
             stopScream()
         case .screamAndJack:
@@ -391,6 +415,8 @@ final class AppViewModel: ObservableObject {
 
     func toggleActiveMode() {
         switch applicationMode {
+        case .off, .steelSeriesOmni:
+            return
         case .scream:
             if configuration.toggleScope == .all {
                 toggleAll()
@@ -416,7 +442,7 @@ final class AppViewModel: ObservableObject {
             sendWakeOnLAN()
         case .audioAndWakeOnLAN:
             let startsAudio = activeModeToggleStartsAudio
-            let startsWakeOnLAN = startsAudio
+            let startsWakeOnLAN = (!applicationMode.routesAudio || startsAudio)
                 && wakeOnLANConfiguration.isEnabled
             logStore.append(
                 source: .app,
@@ -434,6 +460,8 @@ final class AppViewModel: ObservableObject {
 
     private var activeModeToggleStartsAudio: Bool {
         switch applicationMode {
+        case .off, .steelSeriesOmni:
+            return false
         case .scream:
             if configuration.toggleScope == .all {
                 return screamService.status != .running
@@ -456,6 +484,11 @@ final class AppViewModel: ObservableObject {
         startsAudio: Bool,
         startsWakeOnLAN: Bool
     ) -> String {
+        if !applicationMode.routesAudio {
+            return startsWakeOnLAN
+                ? "Combined shortcut sending Wake on LAN; audio routing is off"
+                : "Combined shortcut ignored; audio routing is off and Wake on LAN is disabled"
+        }
         if !startsAudio {
             return "Combined shortcut stopping audio"
         }
@@ -644,6 +677,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func performTerminalShutdown() async {
+        steelSeriesService.setEnabled(false)
         pendingRestartTask?.cancel()
         pendingRestartTask = nil
         serviceStartupTask?.cancel()
@@ -811,8 +845,16 @@ final class AppViewModel: ObservableObject {
         )
     }
 
+    private func updateHeadsetMonitoring() {
+        steelSeriesService.setEnabled(
+            applicationMode == .steelSeriesOmni && !isSleeping && !audioModeCoordinator.isShuttingDown
+        )
+    }
+
     private func restorePersistedAudioRuntimeState() {
         switch applicationMode {
+        case .off, .steelSeriesOmni:
+            return
         case .scream:
             restoreScreamRuntimeWithoutPersisting()
         case .directRouting:
@@ -828,6 +870,9 @@ final class AppViewModel: ObservableObject {
     }
 
     private func restoreScreamRuntimeWithoutPersisting() {
+        guard applicationMode == .scream,
+              !audioModeCoordinator.isTransitioning,
+              !audioModeCoordinator.isShuttingDown else { return }
         if audioRuntimeState.screamShouldRun {
             logStore.append(
                 source: .app,
@@ -854,6 +899,8 @@ final class AppViewModel: ObservableObject {
         shouldRun: Bool
     ) {
         switch mode {
+        case .off, .steelSeriesOmni:
+            return
         case .scream:
             updateScreamRuntimeIntent(
                 jackShouldRun: shouldRun,
@@ -900,12 +947,16 @@ final class AppViewModel: ObservableObject {
 
     private func switchApplicationMode(from previousMode: ApplicationMode) {
         guard previousMode != applicationMode else { return }
+        directRoutingShouldResumeAfterSleep = false
 
-        let shouldContinueRunning: Bool
+        let sourceIsRunning: Bool
         let stopPreviousMode: AudioModeCoordinator.CleanupOperation
         switch previousMode {
+        case .off, .steelSeriesOmni:
+            sourceIsRunning = false
+            stopPreviousMode = {}
         case .scream:
-            shouldContinueRunning = jackShouldBeRunning
+            sourceIsRunning = jackShouldBeRunning
                 || jackService.status.isActive
                 || screamService.status.isActive
             pendingRestartTask?.cancel()
@@ -919,16 +970,22 @@ final class AppViewModel: ObservableObject {
                 try await self.jackService.stopAndWait()
             }
         case .directRouting:
-            shouldContinueRunning = directRoutingService.desiredRunning
+            sourceIsRunning = directRoutingService.desiredRunning
             stopPreviousMode = { [weak self] in
                 guard let self else { return }
                 try await self.directRoutingService.stopAndWait()
             }
         }
 
+        let shouldStartTarget = applicationMode.routesAudio
+            && audioModeCoordinator.shouldContinueRunning(
+                from: previousMode,
+                runtimeState: audioRuntimeState,
+                sourceIsRunning: sourceIsRunning
+            )
         updateRuntimeIntent(
             for: applicationMode,
-            shouldRun: shouldContinueRunning
+            shouldRun: shouldStartTarget
         )
 
         logStore.append(
@@ -939,7 +996,7 @@ final class AppViewModel: ObservableObject {
         audioModeCoordinator.transition(
             from: previousMode,
             to: targetMode,
-            shouldStartTarget: shouldContinueRunning,
+            shouldStartTarget: shouldStartTarget,
             stopSource: stopPreviousMode,
             startTarget: { [weak self] in
                 guard let self, self.applicationMode == targetMode else { return }

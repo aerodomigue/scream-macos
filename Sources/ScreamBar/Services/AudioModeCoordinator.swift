@@ -14,6 +14,21 @@ final class AudioModeCoordinator: ObservableObject {
     private var pendingCleanup: (mode: ApplicationMode, operation: CleanupOperation)?
     private(set) var isShuttingDown = false
 
+    func shouldContinueRunning(
+        from mode: ApplicationMode,
+        runtimeState: PersistedAudioRuntimeState,
+        sourceIsRunning: Bool
+    ) -> Bool {
+        guard mode.routesAudio else { return true }
+        guard isTransitioning else { return sourceIsRunning }
+        // An intermediate mode may not have started yet. Preserve the requested intent.
+        switch mode {
+        case .scream: return runtimeState.jackShouldRun || runtimeState.screamShouldRun
+        case .directRouting: return runtimeState.directRoutingShouldRun
+        case .off, .steelSeriesOmni: return true
+        }
+    }
+
     func transition(
         from sourceMode: ApplicationMode,
         to targetMode: ApplicationMode,
@@ -64,7 +79,7 @@ final class AudioModeCoordinator: ObservableObject {
                 return
             }
             self.transitionError = nil
-            if shouldStartTarget {
+            if shouldStartTarget && targetMode.routesAudio {
                 startTarget()
             }
             self.isTransitioning = false

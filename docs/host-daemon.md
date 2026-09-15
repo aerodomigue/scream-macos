@@ -54,8 +54,10 @@ The UI shows the agent's countdown and offers **Cancel shutdown** while the API
 reports the operation cancellable. Once native OS dispatch starts, cancellation
 may be too late. OS acceptance does not prove physical power-off.
 
-Closing the menu stops ordinary reachability polling but does not cancel an
-accepted shutdown. Active operations continue to be followed using their original
+In Scream and Direct Routing, closing the menu stops ordinary reachability polling.
+OFF and SteelSeries Omni keep it active so the main menu bar icon can show PC status.
+Closing the menu never cancels an accepted shutdown. Active operations continue to
+be followed using their original
 host, daemon instance, request UUID, operation UUID and principal. A public recovery
 record is written before sending the mutation and retained under
 `~/Library/Application Support/ScreamBar/daemon-pending-action.json`.

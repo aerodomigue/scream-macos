@@ -27,7 +27,7 @@ struct MenuBarView: View {
             Group {
                 switch selectedTab {
                 case .status:
-                    if viewModel.applicationMode == .directRouting
+                    if viewModel.applicationMode != .scream
                         || viewModel.jackService.isInstalled
                         || viewModel.wakeOnLANConfiguration.isEnabled
                         || viewModel.daemonShutdownService.hasPendingAction {
@@ -76,12 +76,10 @@ struct MenuBarView: View {
         }
         .frame(width: 380, height: 420)
         .onAppear {
-            viewModel.wakeOnLANService.setInterfaceVisible(true)
-            viewModel.daemonShutdownService.setInterfaceVisible(true)
+            viewModel.setMenuVisible(true)
         }
         .onDisappear {
-            viewModel.wakeOnLANService.setInterfaceVisible(false)
-            viewModel.daemonShutdownService.setInterfaceVisible(false)
+            viewModel.setMenuVisible(false)
         }
     }
 }

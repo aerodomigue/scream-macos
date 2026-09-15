@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Low-latency audio routing for the macOS menu bar.</strong><br>
-  Receive Scream network audio, route CoreAudio devices directly, and wake a remote machine from one compact application.
+  Receive Scream network audio, route CoreAudio devices directly, monitor your SteelSeries headset batteries, and wake or shut down a remote machine from one compact application.
 </p>
 
 <p align="center">
@@ -17,12 +17,14 @@
   <img src="docs/screenshot/global%20capture.png" width="474" alt="ScreamBar running Direct Routing and Wake-on-LAN from the macOS menu bar">
 </p>
 
-ScreamBar provides two mutually exclusive audio modes:
+ScreamBar provides four application modes:
 
+- **OFF** stops software audio routing while keeping PC monitoring, Wake-on-LAN, and paired shutdown control available.
 - **Scream** receives audio sent over the network by a [Scream](https://github.com/duncanthrax/scream) sender and plays it through JACK.
 - **Direct Routing** sends one CoreAudio input device directly to one CoreAudio output device without JACK or network capture.
+- **SteelSeries Omni** monitors an Arctis Nova Pro Omni base over USB, showing headset connection and both batteries. The base handles audio; ScreamBar does not route audio in this mode.
 
-It can also send Wake-on-LAN magic packets independently of the selected audio mode.
+Wake-on-LAN and the paired **Host Daemon** shutdown agent are available independently of the selected mode. See [agent setup and pairing](docs/host-daemon.md).
 
 ScreamBar runs as a menu bar-only application and requires macOS 13 Ventura or later.
 
@@ -92,16 +94,16 @@ make HOMEBREW_PREFIX="$(brew --prefix)" build
 
 ## Usage
 
-Click the speaker icon in the menu bar, open **Settings**, and select **Scream** or **Direct Routing** under **Application Mode**. Changing the mode stops the previous mode before the new one can start. Settings are saved automatically.
+Click the main menu bar icon, open **Settings**, and choose **OFF**, **Scream**, **Direct Routing**, or **SteelSeries Omni** from the **Application Mode** menu. Changing the mode stops the previous audio mode before another can start. OFF and SteelSeries Omni never start software audio routing. Settings are saved automatically.
 
-The controls common to both modes are:
+Common controls and behavior:
 
-- The running/stopped state is restored on the next launch. Quit while the selected audio services are running to start them again next time; stop them before quitting to keep them stopped.
+- For Scream and Direct Routing, the running/stopped state is restored on the next launch. Quit while the selected audio services are running to start them again next time; stop them before quitting to keep them stopped. Launching in OFF or SteelSeries Omni keeps audio routing stopped.
 - **Launch at login** registers the application as a macOS login item.
 - **Menu Bar** can show the active Direct Routing frame count, app-added
   latency, or both beside the icon. These values are hidden when no running
   route can provide them.
-- **Global Shortcut** can use one combined shortcut for audio and Wake-on-LAN, or separate shortcuts for each action. The combined shortcut sends a magic packet only when it starts audio; pressing it again stops audio without sending another packet. Wake-on-LAN is skipped when it is disabled.
+- **Global Shortcut** can use one combined shortcut for audio and Wake-on-LAN, or separate shortcuts for each action. In Scream and Direct Routing, the combined shortcut sends a magic packet when it starts audio; pressing it again stops audio without sending another packet. In OFF and SteelSeries Omni, it sends Wake-on-LAN without starting audio. Wake-on-LAN is skipped when it is disabled.
 - **USB Device Trigger** can target audio, Wake-on-LAN, or both when the configured USB device reaches the selected start condition. Its opposite event stops audio only when audio is part of the target; Wake-on-LAN has no inverse stop action. Optional Bash commands run before the selected start actions and after USB-triggered audio shutdown. A failed start command prevents all selected start actions, while a failed stop command is logged without blocking audio shutdown.
 - **Wake on LAN** adds a Status action for a configured machine. It accepts a host IPv4 address or an IPv4 subnet in CIDR notation.
 
@@ -109,11 +111,25 @@ The controls common to both modes are:
 
 Enable **Wake on LAN** in Settings, then enter the target machine's MAC address and its IPv4 address with a prefix, such as `10.2.10.247/16`. A subnet such as `10.2.0.0/16` can be used for broadcast-only waking.
 
-ScreamBar sends six standard magic packets over UDP/9 to the directed broadcast address. It monitors an individual host with ICMP while the menu is visible. When the host is online, the Status action becomes **Shutdown**, using the Host Daemon HTTPS API after its trust bundle has been imported. A valid agent response also establishes reachability when ICMP is blocked.
+ScreamBar sends six standard magic packets over UDP/9 to the directed broadcast address. It monitors an individual host with ICMP while the menu is visible, and also while the menu is closed in OFF and SteelSeries Omni so the main icon can show PC reachability. Routine background checks retain the previous indicator instead of flashing a checking state. When the host is online, the Status action becomes **Shutdown**, using the Host Daemon HTTPS API after its trust bundle has been imported. A valid agent response also establishes reachability when ICMP is blocked.
 
 Shutdown uses a 3-second countdown and offers cancellation before native dispatch. Pairing is required by default on new agent installations; per-client keys are stored in the macOS Keychain. Pending actions continue to be followed when the menu closes, and an accepted shutdown keeps the action blocked until a new agent instance is verified. USB triggers and keyboard shortcuts retain their existing WOL/audio behavior.
 
 See [Host Daemon setup, pairing and shutdown behavior](docs/host-daemon.md). The target network and machine firmware/operating system must support Wake-on-LAN; some routers block directed broadcasts.
+
+### SteelSeries Omni
+
+Select **SteelSeries Omni** and connect the Mac to **USB1** on the **SteelSeries Arctis Nova Pro Omni** base. Status shows:
+
+- whether the headset is connected to the base;
+- the headset battery percentage;
+- the spare battery percentage reported by the base's charging slot.
+
+A separate white **headphones + percentage** item appears in the menu bar only in this mode. Move it independently with **Command-drag**. Clicking it opens the battery popup; clicking outside closes it. The main application icon remains available for settings and PC status.
+
+Status is read every five seconds in the background, without SteelSeries GG and without changing the base's audio settings. If the headset disconnects, its old battery percentage is hidden. Unavailable values appear as `—`, and a missing or unresponsive base is reported explicitly. Monitoring pauses during sleep and stops when another mode is selected.
+
+The USB status request has been validated on USB1. USB2 is detected, but did not return status during testing; the application asks you to use USB1. This integration is specific to the **Arctis Nova Pro Omni**, not a claim of support for other SteelSeries headsets. It monitors batteries and connection status; it does not switch macOS audio devices or control ANC, ChatMix, or the base's settings.
 
 ### Scream
 
@@ -139,9 +155,9 @@ For implementation details, latency accounting, runtime metrics, teardown rules,
 
 The first output choice is **System Default**. An explicitly selected output is stored by CoreAudio device UID. If it disconnects, ScreamBar temporarily routes to the current system default and returns to the preferred output when it becomes available again. The saved preference is not overwritten by the fallback. Fallback only applies when the preferred output is unavailable. An explicitly selected input does not silently fall back; the route waits for that input to return.
 
-Available buffer choices are **Automatic**, 64, 128, 256, 512, 1024, and 2048 frames:
+Available buffer choices are **Automatic**, 16, 32, 64, 128, 256, 512, 1024, and 2048 frames:
 
-- **Automatic** leaves synchronized routes at the devices' current buffer sizes. When asynchronous sample-rate conversion is required, it starts with the smallest common supported tier from 64, 128, 256, and 512 frames. It can rebuild at the next tier after a persistent route disruption.
+- **Automatic** leaves synchronized routes at the devices' current buffer sizes. When asynchronous sample-rate conversion is required, it starts with the smallest common supported tier from 16, 32, 64, 128, 256, and 512 frames. It can rebuild at the next tier after a persistent route disruption.
 - An explicit value must be supported by both devices. ScreamBar applies and verifies it before starting, then restores the previous values when the route stops unless another client changed them in the meantime.
 - Smaller buffers can reduce the CoreAudio portion of latency but increase the risk of dropouts. If an automatic tier is rejected during configuration, ScreamBar tries the next tier. Bluetooth transport latency remains independent of this setting; Automatic is recommended for Bluetooth devices.
 
@@ -191,7 +207,11 @@ CoreAudio can briefly pause callbacks while macOS enumerates unrelated hardware.
 
 The Status tab reports stopped, starting, running, reconfiguring, waiting, and error states as appropriate for the selected mode.
 
-The Logs tab contains application, JACK, Scream, Direct Routing, and WOL messages. Its source menu can show all messages or any subset of those sources. Use **Clear** to reset the in-memory log.
+The main icon is a speaker in Scream and Direct Routing, and a Mac Pro symbol in OFF and SteelSeries Omni. Green indicates running audio or an online PC, gray stopped audio or an offline PC, orange a pending or unknown state, and red an error. The separate headset icon stays white and displays the headset battery percentage.
+
+The Logs tab contains timestamped application, JACK, Scream, Direct Routing, and WOL messages. Its source menu can show all messages or any subset of those sources. **Copy** copies all retained entries matching the current filter, including timestamps. **Clear** removes the in-memory entries; cleared messages are not included in later copies. Headset connection and error messages use the App source and are rate-limited; routine battery polls are silent.
+
+Detailed routing diagnostics are written to `~/Library/Logs/ScreamBar/routing-diagnostics.log`, with one active file and two rotated archives, each capped at 1 MB. Writes use a bounded queue outside audio callbacks. The file records callback timing, FIFO behavior, and observed CoreAudio recovery context; correlation with a hardware event does not prove that macOS caused an audio loss. Clearing the Logs tab does not delete these diagnostic files.
 
 ScreamBar stops active audio resources before system sleep and rebuilds the previously running mode after wake. Direct Routing also rebuilds when an effective device or hardware format changes.
 
