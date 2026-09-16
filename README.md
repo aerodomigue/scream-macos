@@ -55,7 +55,7 @@ My current setup uses:
 | All desk USB peripherals connected to the desktop PC | ADDER C-USB LAN USB-over-IP extender |
 | Shared peripherals | KVM connected to the ADDER and the Mac |
 | Dedicated PC peripherals on the ADDER | Omni base USB2 and Bluetooth 5.4 adapter |
-| Monitor input selection | DDC/CI switching between the desktop PC and the Mac |
+| Monitor input selection | My own [MonitorSwitch](https://github.com/aerodomigue/MonitorSwitch-macOnly) app, using DDC/CI to switch between the desktop PC and the Mac |
 | Audio from both machines | SteelSeries Arctis Nova Pro Omni: USB1 to the Mac, USB2 through the ADDER to the PC |
 
 ```mermaid
@@ -78,9 +78,10 @@ peripherals. The Omni base's USB2 connection and the Bluetooth 5.4 adapter conne
 directly to the ADDER, outside the KVM, so they stay dedicated to the PC. The
 Bluetooth adapter brings the PC's Bluetooth connection into the office.
 
-DDC/CI selects the monitor's PC or Mac input. The Omni base handles audio from
-both machines: USB1 connects directly to the Mac, and USB2 reaches the PC through
-the ADDER. ScreamBar reads its batteries and controls its volume over USB1.
+I use my own [MonitorSwitch](https://github.com/aerodomigue/MonitorSwitch-macOnly)
+app to select the monitor's PC or Mac input through DDC/CI. The Omni base handles
+audio from both machines: USB1 connects directly to the Mac, and USB2 reaches the
+PC through the ADDER. ScreamBar reads its batteries and controls its volume over USB1.
 
 In my experience, the system has never been as stable as it is with the ADDER
 and direct HDMI-over-fiber connection. The Apollo/Sunshine freezes I encountered
