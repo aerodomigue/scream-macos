@@ -57,6 +57,23 @@ My current setup uses:
 | Monitor input selection | DDC/CI switching between the desktop PC and the Mac |
 | Audio from both machines | SteelSeries Arctis Nova Pro Omni and its dual audio inputs |
 
+```mermaid
+flowchart LR
+    PC["Desktop PC · Windows / Linux"] -->|"RUIPRO HDMI 2.1 over fiber"| Screen["4K OLED · 240 Hz · HDR"]
+    Mac["Mac · ScreamBar"] -->|"Video"| Screen
+    PC <-->|"USB over IP"| Adder["ADDER C-USB LAN"]
+    Adder <-->|"USB"| KVM["KVM switch"]
+    Mac <-->|"USB"| KVM
+    KVM <--> Peripherals["Keyboard · mouse · webcam · controller"]
+    PC -->|"Audio"| Base["SteelSeries Omni base"]
+    Mac <-->|"USB1 · audio and HID controls"| Base
+    Base --> Headset["Arctis Nova Pro Omni headset"]
+```
+
+The KVM selects which machine gets the shared USB peripherals. DDC/CI selects
+the monitor's PC or Mac input. The Omni base handles audio from both machines;
+ScreamBar reads its batteries and controls its volume over the Mac's USB link.
+
 In my experience, the system has never been as stable as it is with the ADDER
 and direct HDMI-over-fiber connection. The Apollo/Sunshine freezes I encountered
 when VRAM filled up are gone, along with the performance overhead of capturing
@@ -181,7 +198,12 @@ ScreamBar sends six standard magic packets over UDP/9 to the directed broadcast 
 
 Shutdown uses a 3-second countdown and offers cancellation before native dispatch. Pairing is required by default on new agent installations; per-client keys are stored in the macOS Keychain. Pending actions continue to be followed when the menu closes, and an accepted shutdown keeps the action blocked until a new agent instance is verified. USB triggers and keyboard shortcuts retain their existing WOL/audio behavior.
 
-See [Host Daemon setup, pairing and shutdown behavior](docs/host-daemon.md). The target network and machine firmware/operating system must support Wake-on-LAN; some routers block directed broadcasts.
+The companion agent lives in [scream-agent](https://github.com/aerodomigue/scream-agent),
+with [installation instructions](https://github.com/aerodomigue/scream-agent/blob/main/docs/install.md)
+and [build instructions](https://github.com/aerodomigue/scream-agent/blob/main/docs/build.md).
+See [Host Daemon setup, pairing and shutdown behavior](docs/host-daemon.md) for the
+ScreamBar side. The target network and machine firmware/operating system must
+support Wake-on-LAN; some routers block directed broadcasts.
 
 ### SteelSeries Omni
 
@@ -197,22 +219,17 @@ the base's USB HID interface, without SteelSeries GG. The dedicated mode keeps
 these headset-specific controls together and only intercepts volume/mute keys when
 Omni mode is active, the headset is connected, and Omni is the Mac's default output.
 
-Select **SteelSeries Omni** and connect the Mac to **USB1** on the **SteelSeries Arctis Nova Pro Omni** base. Status shows:
+Select **SteelSeries Omni** and connect the Mac to **USB1** on the base. Status and
+its separate menu bar popup show the headset connection, volume, headset battery,
+and spare battery in the base. The independently movable headphones + percentage
+item appears only in this mode.
 
-- whether the headset is connected to the base;
-- the base's current volume, above the battery rows;
-- the headset battery percentage;
-- the spare battery percentage reported by the base's charging slot.
+Keyboard volume and mute controls require Accessibility permission and Omni as
+the Mac's default sound output. The macOS Control Center slider, ANC, and ChatMix
+are not controlled by this integration. USB2 did not return status during testing.
 
-A separate **headphones + percentage** item appears in the menu bar only in this mode, white on the active display and light gray on an inactive display. Move it independently with **Command-drag**. Clicking it opens the battery popup; clicking outside closes it. The main application icon remains available for settings and PC status.
-
-Status is read every five seconds in the background, without SteelSeries GG and without changing the base's audio settings. If the headset disconnects, its old battery percentage is hidden. Unavailable values appear as `—`, and a missing or unresponsive base is reported explicitly. Monitoring pauses during sleep and stops when another mode is selected.
-
-**Volume + / − and Mute keys** control the base's hardware volume while Omni mode is active, the headset is connected, and Omni is the Mac's default sound output. Click **Allow volume keys…** in Status or the headset popup and enable ScreamBar in **System Settings → Privacy & Security → Accessibility**. Each press moves one hardware step (about 1.8 percentage points); holding a key repeats. Rapid presses are combined without dropping their effect, including changes of direction at the volume limits. The displayed percentage follows key presses immediately and is checked against the base after the burst. Accepted keys also show a compact macOS-style volume indicator near the upper-right corner of the screen containing the pointer; it disappears 1.5 seconds after the last press without taking focus or adding USB polling. ScreamBar reads the current volume at the start of each key sequence, then sends changes using the last successfully written value. It verifies the result after 150 ms without a new press; this quiet interval delays only verification, never writes. Dial changes are picked up at the start of the next sequence. Holding a key at 0% or 100% sends no redundant volume commands. Both views share one volume refresh about once a second while visible; closing them stops volume polling. Battery status is still checked every five seconds in Omni mode. Unchanged values do not trigger interface updates. USB operations run in the background, with at least 50 ms between commands; pending adjustments are cancelled when the mode or output changes. The macOS Control Center volume slider is not handled by this feature. It changes no audio routing and adds no audio processing latency.
-
-**Mute** is intercepted before macOS handles it, avoiding the native mute/unmute loop. It sets the base volume to 0%; pressing Mute again restores the previously read volume. Holding Mute toggles only once. Volume + / − leaves mute and adjusts from zero. The popup and volume indicator show the muted state. A physical dial change to a nonzero value clears it. An unknown initial 0% never restores an invented volume, and leaving Omni mode, changing output, or disconnecting clears the saved restore value. Temporary USB failures preserve a known restore value and keep eligible keys intercepted, with a one-second pause before another keyboard operation. Queued actions and error logs are bounded.
-
-The USB status request and hardware volume read/write have been validated on USB1. USB2 is detected, but did not return status during testing; the application asks you to use USB1. This integration is specific to the **Arctis Nova Pro Omni**, not a claim of support for other SteelSeries headsets. It does not switch macOS audio devices or control ANC or ChatMix.
+See [SteelSeries Omni setup and controls](docs/steelseries-omni.md) for permissions,
+volume/mute behavior, polling limits, and USB support details.
 
 ### Scream
 

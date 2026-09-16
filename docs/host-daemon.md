@@ -7,6 +7,12 @@ client, SSH, SMB or remote Windows RPC tool is involved.
 
 ## Connect the agent
 
+Host Daemon is maintained in [scream-agent](https://github.com/aerodomigue/scream-agent).
+Start with its [installation guide](https://github.com/aerodomigue/scream-agent/blob/main/docs/install.md)
+and [Windows/Linux build instructions](https://github.com/aerodomigue/scream-agent/blob/main/docs/build.md).
+There are no published GitHub releases as of September 16, 2026; the build guide
+explains how to produce the Windows installer and Linux binaries.
+
 Install and start Host Daemon on the PC. The Windows installer automatically creates
 **`C:\Program Files\HostDaemon\screambar-pairing.json`**, at the installation root
 next to `bin` (or under your chosen installation directory). Copy this file to the
