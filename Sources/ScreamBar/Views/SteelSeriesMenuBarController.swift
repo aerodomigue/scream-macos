@@ -46,7 +46,7 @@ final class SteelSeriesMenuBarController: NSObject, ObservableObject, NSPopoverD
         statusItem?.isVisible = true
         let description = "SteelSeries Omni: \(state.connectionDescription). Headset: \(state.headsetBatteryText). Battery in base: \(state.baseBatteryText)."
         statusItem?.button?.image = SteelSeriesMenuBarImage.make(
-            batteryText: state.headsetBatteryText, description: description
+            state: state, description: description
         )
         statusItem?.button?.toolTip = description
         statusItem?.button?.setAccessibilityLabel(description)

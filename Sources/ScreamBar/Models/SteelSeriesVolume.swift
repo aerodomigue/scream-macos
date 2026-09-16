@@ -7,8 +7,8 @@ struct SteelSeriesVolume: Equatable, Sendable {
     static let SETTINGS_LENGTH = 256
     static let VOLUME_OFFSET = 142
     static let MAX_ATTENUATION = 56
-    // The GG protocol specifies at least 50 ms between commands.
-    static let COMMAND_SETTLE_SECONDS: TimeInterval = 0.05
+    // Only settings reads need time for the base to prepare its feature report.
+    static let READ_RESPONSE_SETTLE_SECONDS: TimeInterval = 0.05
 
     let attenuation: UInt8
 

@@ -234,7 +234,9 @@ and spare battery in the base. The independently movable headphones + percentage
 item appears only in this mode.
 
 Keyboard volume and mute controls require Accessibility permission and Omni as
-the Mac's default sound output. The macOS Control Center slider, ANC, and ChatMix
+the Mac's default sound output. Knob notches are sent individually without an added
+delay, with the native volume sound when macOS's **Play feedback when volume is changed**
+setting is enabled. The macOS Control Center slider, ANC, and ChatMix
 are not controlled by this integration. USB2 did not return status during testing.
 
 See [SteelSeries Omni setup and controls](docs/steelseries-omni.md) for permissions,
@@ -316,7 +318,7 @@ CoreAudio can briefly pause callbacks while macOS enumerates unrelated hardware.
 
 The Status tab reports stopped, starting, running, reconfiguring, waiting, and error states as appropriate for the selected mode.
 
-The main icon is a speaker in Scream and Direct Routing, and a Mac Pro symbol in OFF and SteelSeries Omni. Green indicates running audio or an online PC, gray stopped audio or an offline PC, orange a pending or unknown state, and red an error. The separate headset indicator displays the headset battery percentage, with the same display-dependent tint for its icon and text.
+The main icon is a speaker in Scream and Direct Routing, and a Mac Pro symbol in OFF and SteelSeries Omni. Green indicates running audio or an online PC, gray stopped audio or an offline PC, orange a pending or unknown state, and red an error. The separate headset indicator displays the headset battery percentage: only its headset icon turns orange below 20% and red below 10%, while the percentage keeps its normal display-dependent tint.
 
 The Logs tab contains timestamped application, JACK, Scream, Direct Routing, and WOL messages. Its source menu can show all messages or any subset of those sources. **Copy** copies all retained entries matching the current filter, including timestamps. **Clear** removes the in-memory entries; cleared messages are not included in later copies. Headset connection and error messages use the App source and are rate-limited; routine battery polls are silent.
 

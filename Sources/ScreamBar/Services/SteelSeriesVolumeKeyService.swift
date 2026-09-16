@@ -8,6 +8,7 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
     private static let BURST_QUIET_INTERVAL: TimeInterval = 0.15
     private static let MINIMUM_LOG_INTERVAL: TimeInterval = 30
     private static let TRANSPORT_RETRY_INTERVAL: TimeInterval = 1
+    private static let FEEDBACK_RETRY_INTERVAL: TimeInterval = 1
     private static let OMNI_DEVICE_NAME = "Arctis Nova Pro Omni"
 
     @Published private(set) var statusText = "Volume keys inactive"
@@ -19,6 +20,7 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
     var volumeText: String { volume.map { isMuted ? "Muted · \($0.percentage)%" : "\($0.percentage)%" } ?? "—" }
     private let transport: SteelSeriesVolumeAdjusting
     private let monitor: VolumeKeyMonitoring
+    private let feedback: VolumeFeedbackPlaying
     private weak var logStore: RollingLogStore?
     private var enabled = false
     private var connected = false
@@ -39,6 +41,9 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
     private var generation: UInt64 = 0
     private var lastFailureLog: Date = .distantPast
     private var retryAfter: TimeInterval = 0
+    private var feedbackRetryAfter: TimeInterval = 0
+    private var feedbackRevision: UInt64 = 0
+    private var lastFeedbackFailureLog: Date = .distantPast
     private var visibleDisplays = Set<VolumeDisplay>()
     private var displayPolling: Task<Void, Never>?
     private var lastReadTime: TimeInterval = -.infinity
@@ -46,10 +51,12 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
 
     init(transport: SteelSeriesVolumeAdjusting, logStore: RollingLogStore,
          monitor: VolumeKeyMonitoring? = nil,
+         feedback: VolumeFeedbackPlaying? = nil,
          refreshInterval: TimeInterval? = nil) {
         self.transport = transport
         self.logStore = logStore
         self.monitor = monitor ?? VolumeKeyMonitor()
+        self.feedback = feedback ?? VolumeFeedbackSoundService()
         self.refreshInterval = refreshInterval ?? Self.DISPLAY_REFRESH_INTERVAL
         precondition(self.refreshInterval.isFinite && self.refreshInterval > 0)
         self.monitor.onStep = { [weak self] steps in self?.enqueue(steps) ?? false }
@@ -134,6 +141,7 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
             return
         } catch {
             guard volumeRevision == revision else { return }
+            feedback.silence()
             publishVolume(nil)
             logFailure("SteelSeries volume read: \(error.localizedDescription)")
         }
@@ -167,6 +175,10 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
         publishPermission(!ready)
         if !ready { cancelPending() }
         publishStatus(ready ? "Volume + / − and Mute control the base" : "Could not enable volume keys; check Accessibility access")
+        if ready, let outputUID, ProcessInfo.processInfo.systemUptime >= feedbackRetryAfter {
+            do { try feedback.prepare(outputUID: outputUID) }
+            catch { logFeedbackFailure(error) }
+        }
     }
 
     @discardableResult
@@ -183,6 +195,8 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
     @discardableResult
     func enqueueMute() -> Bool {
         guard canHandleKeys else { return false }
+        feedbackRevision &+= 1
+        feedback.silence()
         guard ProcessInfo.processInfo.systemUptime >= retryAfter else { return true }
         guard pendingActions.appendMute() else { return handleOverflow() }
         beginAction(.toggleMute)
@@ -190,7 +204,9 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
     }
 
     private func handleOverflow() -> Bool {
-        logFailure("Volume input queue is full; excess input ignored")
+        let message = "Volume input queue is full; excess input ignored"
+        publishStatus(message)
+        logFailure(message)
         // Never forward an overloaded mute press to CoreAudio.
         return true
     }
@@ -221,6 +237,7 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
                         continue
                     }
                     guard let current = confirmedState, let action = pendingActions.popFirst() else { break }
+                    let currentFeedbackRevision = feedbackRevision
                     let target = current.applying(action)
                     let applied = target.volume == current.volume ? current.volume
                         : try await transport.adjustVolume(SteelSeriesVolumeChange(target: target.volume),
@@ -230,10 +247,18 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
                     confirmedState = state
                     burstVolume = applied
                     publishState(pendingActions.applying(to: state))
+                    if case .adjust = action, applied != current.volume, applied.percentage > 0,
+                       currentFeedbackRevision == feedbackRevision, !pendingActions.containsMute,
+                       ProcessInfo.processInfo.systemUptime >= feedbackRetryAfter {
+                        do { try feedback.play(request: request) }
+                        catch is CancellationError { feedback.stop() }
+                        catch { logFeedbackFailure(error) }
+                    }
                 } catch is CancellationError {
                     guard generation == currentGeneration else { return }
                     burstVolume = nil
                     confirmedState = nil
+                    feedback.stop()
                     break
                 } catch {
                     guard generation == currentGeneration else { return }
@@ -241,6 +266,7 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
                     // Keep consuming mute while eligible, even if USB temporarily fails.
                     retryAfter = ProcessInfo.processInfo.systemUptime + Self.TRANSPORT_RETRY_INTERVAL
                     keyFeedback.send(false)
+                    feedback.silence()
                     publishVolume(nil)
                     burstVolume = nil
                     logFailure(statusText)
@@ -297,8 +323,19 @@ final class SteelSeriesVolumeKeyService: ObservableObject {
         logStore?.append(source: .app, message: message)
     }
 
+    private func logFeedbackFailure(_ error: Error) {
+        feedback.stop()
+        feedbackRetryAfter = ProcessInfo.processInfo.systemUptime + Self.FEEDBACK_RETRY_INTERVAL
+        guard Date().timeIntervalSince(lastFeedbackFailureLog) >= Self.MINIMUM_LOG_INTERVAL else { return }
+        lastFeedbackFailureLog = Date()
+        logStore?.append(source: .app, message: "Volume feedback: \(error.localizedDescription)")
+    }
+
     private func cancelPending() {
         keyFeedback.send(false)
+        feedbackRevision &+= 1
+        feedback.stop()
+        feedbackRetryAfter = 0
         volumeRevision &+= 1
         generation &+= 1
         ready = false

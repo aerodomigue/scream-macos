@@ -33,18 +33,19 @@ enum SteelSeriesVolumeAction {
     case toggleMute
 }
 
-/// Coalesces repeated volume keys while retaining ordering around mute presses.
+/// Preserves individual volume steps and their ordering around mute presses.
 struct SteelSeriesVolumeActions {
     private static let MAX_PENDING_ACTIONS = 128
     private var actions: [SteelSeriesVolumeAction] = []
     var isEmpty: Bool { actions.isEmpty }
+    var containsMute: Bool {
+        actions.contains {
+            if case .toggleMute = $0 { return true }
+            return false
+        }
+    }
 
     mutating func append(step: Int) -> Bool {
-        if case .adjust(var change) = actions.last {
-            change.append(step)
-            actions[actions.count - 1] = .adjust(change)
-            return true
-        }
         guard actions.count < Self.MAX_PENDING_ACTIONS else { return false }
         var change = SteelSeriesVolumeChange()
         change.append(step)

@@ -1,19 +1,21 @@
 import AppKit
 
-/// Uses one image so AppKit applies the same inactive-display tint to icon and text.
+/// Keeps battery warning colors on the headset while preserving the white percentage.
 @MainActor
 enum SteelSeriesMenuBarImage {
     private static let ICON_SIZE: CGFloat = 14
     private static let ICON_SPACING: CGFloat = 5
+    private static let LOW_BATTERY_THRESHOLD = 20
+    private static let CRITICAL_BATTERY_THRESHOLD = 10
     private static let FONT = NSFont.monospacedDigitSystemFont(
         ofSize: NSFont.systemFontSize, weight: .regular
     )
 
-    static func make(batteryText: String, description: String) -> NSImage? {
+    static func make(state: SteelSeriesHeadsetState, description: String) -> NSImage? {
         guard let icon = MenuBarSymbol.image(
-            name: "headphones", color: .white, description: "Headset"
+            name: "headphones", color: iconColor(percentage: state.status?.headsetBattery), description: "Headset"
         ) else { return nil }
-        let title = NSAttributedString(string: batteryText, attributes: [
+        let title = NSAttributedString(string: state.headsetBatteryText, attributes: [
             .font: FONT,
             .foregroundColor: NSColor.white,
         ])
@@ -35,5 +37,12 @@ enum SteelSeriesMenuBarImage {
         image.isTemplate = false
         image.accessibilityDescription = description
         return image
+    }
+
+    private static func iconColor(percentage: Int?) -> NSColor {
+        guard let percentage else { return .white }
+        if percentage < CRITICAL_BATTERY_THRESHOLD { return .systemRed }
+        if percentage < LOW_BATTERY_THRESHOLD { return .systemOrange }
+        return .white
     }
 }

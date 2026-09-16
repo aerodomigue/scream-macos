@@ -9,7 +9,6 @@ protocol SteelSeriesStatusReading: AnyObject {
 @MainActor
 final class SteelSeriesHIDTransport: SteelSeriesStatusReading, SteelSeriesVolumeAdjusting {
     private let queue = DispatchQueue(label: "com.screambar.steelseries", qos: .utility)
-    private let pacer = SteelSeriesCommandPacer()
     private var pendingRead: Task<SteelSeriesHeadsetState, Never>?
 
     func adjustVolume(_ change: SteelSeriesVolumeChange, from current: SteelSeriesVolume?,
@@ -23,12 +22,11 @@ final class SteelSeriesHIDTransport: SteelSeriesStatusReading, SteelSeriesVolume
 
     private func performVolumeOperation(request: SteelSeriesVolumeRequest,
                                         change: SteelSeriesVolumeChange?, current: SteelSeriesVolume? = nil) async throws -> SteelSeriesVolume {
-        let pacer = pacer
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 queue.async {
                     continuation.resume(with: Result {
-                        try SteelSeriesHIDSession.volumeOperation(change: change, current: current, request: request, pacer: pacer)
+                        try SteelSeriesHIDSession.volumeOperation(change: change, current: current, request: request)
                     })
                 }
             }
@@ -41,11 +39,10 @@ final class SteelSeriesHIDTransport: SteelSeriesStatusReading, SteelSeriesVolume
         // A mode change cannot enqueue additional USB requests while one is pending.
         if let pendingRead { return await pendingRead.value }
         let queue = queue
-        let pacer = pacer
         let operation = Task {
             await withCheckedContinuation { continuation in
                 queue.async {
-                    continuation.resume(returning: SteelSeriesHIDSession.readSnapshot(pacer: pacer))
+                    continuation.resume(returning: SteelSeriesHIDSession.readSnapshot())
                 }
             }
         }
@@ -80,9 +77,9 @@ private final class SteelSeriesHIDSession {
         inputBuffer.deallocate()
     }
 
-    static func readSnapshot(pacer: SteelSeriesCommandPacer) -> SteelSeriesHeadsetState {
+    static func readSnapshot() -> SteelSeriesHeadsetState {
         do {
-            return try SteelSeriesHIDSession(device: findDevice()).read(pacer: pacer)
+            return try SteelSeriesHIDSession(device: findDevice()).read()
         } catch let failure as DeviceSelectionFailure {
             return failure.state
         } catch {
@@ -114,8 +111,8 @@ private final class SteelSeriesHIDSession {
                 ? .usb1Required : .baseDisconnected)
     }
 
-    static func volumeOperation(change: SteelSeriesVolumeChange?, current: SteelSeriesVolume?, request: SteelSeriesVolumeRequest,
-                                pacer: SteelSeriesCommandPacer) throws -> SteelSeriesVolume {
+    static func volumeOperation(change: SteelSeriesVolumeChange?, current: SteelSeriesVolume?,
+                                request: SteelSeriesVolumeRequest) throws -> SteelSeriesVolume {
         try request.validate()
         let device: IOHIDDevice
         do { device = try findDevice() }
@@ -125,23 +122,21 @@ private final class SteelSeriesHIDSession {
         try check(IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)), operation: "open base")
         defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
         // Only the current key sequence may supply its last successfully written value.
-        let current = try current ?? readVolume(device, request: request, pacer: pacer)
+        let current = try current ?? readVolume(device, request: request)
         guard let change else { return current }
         guard request.outputUID != nil else { throw CancellationError() }
         let target = change.applying(to: current)
         guard target != current else { return current }
-        pacer.waitBeforeCommand()
         try request.validate()
-        try send(target.writeRequest, to: device, pacer: pacer)
+        try send(target.writeRequest, to: device)
         // A single final readback is scheduled after the key burst, not after every write.
         return target
     }
 
-    private static func readVolume(_ device: IOHIDDevice, request: SteelSeriesVolumeRequest,
-                                   pacer: SteelSeriesCommandPacer) throws -> SteelSeriesVolume {
+    private static func readVolume(_ device: IOHIDDevice, request: SteelSeriesVolumeRequest) throws -> SteelSeriesVolume {
         try request.validate()
-        try send(SteelSeriesVolume.readRequest, to: device, pacer: pacer)
-        Thread.sleep(forTimeInterval: SteelSeriesVolume.COMMAND_SETTLE_SECONDS)
+        try send(SteelSeriesVolume.readRequest, to: device)
+        Thread.sleep(forTimeInterval: SteelSeriesVolume.READ_RESPONSE_SETTLE_SECONDS)
         try request.validate()
         var bytes = [UInt8](repeating: 0, count: SteelSeriesVolume.SETTINGS_LENGTH)
         bytes[0] = UInt8(SteelSeriesHeadsetStatus.REPORT_ID)
@@ -157,9 +152,7 @@ private final class SteelSeriesHIDSession {
         return volume
     }
 
-    private static func send(_ bytes: [UInt8], to device: IOHIDDevice, pacer: SteelSeriesCommandPacer) throws {
-        pacer.waitBeforeCommand()
-        defer { pacer.commandCompleted() }
+    private static func send(_ bytes: [UInt8], to device: IOHIDDevice) throws {
         let status = bytes.withUnsafeBufferPointer {
             IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, SteelSeriesHeadsetStatus.REPORT_ID,
                                  $0.baseAddress!, $0.count)
@@ -177,7 +170,7 @@ private final class SteelSeriesHIDSession {
         (IOHIDDeviceGetProperty(device, key as CFString) as? NSNumber)?.intValue ?? 0
     }
 
-    private func read(pacer: SteelSeriesCommandPacer) -> SteelSeriesHeadsetState {
+    private func read() -> SteelSeriesHeadsetState {
         guard let runLoop = CFRunLoopGetCurrent() else {
             return .failed("Could not prepare the base status reader")
         }
@@ -217,12 +210,10 @@ private final class SteelSeriesHIDSession {
         request[0] = UInt8(SteelSeriesHeadsetStatus.REPORT_ID)
         request[1] = SteelSeriesHeadsetStatus.STATUS_OPCODE
         // B0 only requests status; it does not change the station's audio settings.
-        pacer.waitBeforeCommand()
         let sendStatus = request.withUnsafeBufferPointer {
             IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput,
                                  SteelSeriesHeadsetStatus.REPORT_ID, $0.baseAddress!, $0.count)
         }
-        pacer.commandCompleted()
         guard sendStatus == kIOReturnSuccess else { return Self.failure("read base", sendStatus) }
         CFRunLoopRunInMode(.defaultMode, Self.RESPONSE_TIMEOUT, false)
         if let callbackFailure { return Self.failure("receive base status", callbackFailure) }
@@ -233,17 +224,4 @@ private final class SteelSeriesHIDSession {
     private static func failure(_ operation: String, _ status: IOReturn) -> SteelSeriesHeadsetState {
         .failed("Could not \(operation) (\(String(format: "0x%08x", status)))")
     }
-}
-
-/// Used exclusively on the transport's serial queue to pace all command families.
-private final class SteelSeriesCommandPacer: @unchecked Sendable {
-    private var lastCommandTime: TimeInterval = 0
-
-    func waitBeforeCommand() {
-        let remaining = SteelSeriesVolume.COMMAND_SETTLE_SECONDS
-            - (ProcessInfo.processInfo.systemUptime - lastCommandTime)
-        if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
-    }
-
-    func commandCompleted() { lastCommandTime = ProcessInfo.processInfo.systemUptime }
 }
