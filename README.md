@@ -52,10 +52,11 @@ My current setup uses:
 | Role | Hardware or control |
 | --- | --- |
 | Video from the desktop PC | RUIPRO fiber-optic HDMI 2.1 cable |
-| USB connection to the desktop PC | ADDER C-USB LAN USB-over-IP extender |
-| Shared peripherals | KVM switch selecting the Mac or the ADDER connection |
+| All desk USB peripherals connected to the desktop PC | ADDER C-USB LAN USB-over-IP extender |
+| Shared peripherals | KVM connected to the ADDER and the Mac |
+| Dedicated PC peripherals on the ADDER | Omni base USB2 and Bluetooth 5.4 adapter |
 | Monitor input selection | DDC/CI switching between the desktop PC and the Mac |
-| Audio from both machines | SteelSeries Arctis Nova Pro Omni and its dual audio inputs |
+| Audio from both machines | SteelSeries Arctis Nova Pro Omni: USB1 to the Mac, USB2 through the ADDER to the PC |
 
 ```mermaid
 flowchart LR
@@ -65,14 +66,21 @@ flowchart LR
     Adder <-->|"USB"| KVM["KVM switch"]
     Mac <-->|"USB"| KVM
     KVM <--> Peripherals["Keyboard · mouse · webcam · controller"]
-    PC -->|"Audio"| Base["SteelSeries Omni base"]
+    Adder <-->|"USB2 · PC audio"| Base["SteelSeries Omni base"]
+    Adder <-->|"USB"| Bluetooth["Bluetooth 5.4 adapter · PC only"]
     Mac <-->|"USB1 · audio and HID controls"| Base
     Base --> Headset["Arctis Nova Pro Omni headset"]
 ```
 
-The KVM selects which machine gets the shared USB peripherals. DDC/CI selects
-the monitor's PC or Mac input. The Omni base handles audio from both machines;
-ScreamBar reads its batteries and controls its volume over the Mac's USB link.
+All desk USB devices used by the desktop PC go through the ADDER, including audio.
+The KVM is connected to the ADDER and selects which machine gets the shared
+peripherals. The Omni base's USB2 connection and the Bluetooth 5.4 adapter connect
+directly to the ADDER, outside the KVM, so they stay dedicated to the PC. The
+Bluetooth adapter brings the PC's Bluetooth connection into the office.
+
+DDC/CI selects the monitor's PC or Mac input. The Omni base handles audio from
+both machines: USB1 connects directly to the Mac, and USB2 reaches the PC through
+the ADDER. ScreamBar reads its batteries and controls its volume over USB1.
 
 In my experience, the system has never been as stable as it is with the ADDER
 and direct HDMI-over-fiber connection. The Apollo/Sunshine freezes I encountered
